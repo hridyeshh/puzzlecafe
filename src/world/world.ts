@@ -30,7 +30,7 @@ export function makeWorld(seed: number) {
     return made;
   }
 
-  const sample: Sample = { c: 0, smooth: 0, detail: 0 };
+  const sample: Sample = { c: 0, smooth: 0, detail: 0, peak: 0, alpine: 0, arid: 0 };
   const near: Near = { d: 0, h: 0 };
   /** Terrain height at x, z; equal to the chunk meshes at their vertices. */
   function heightAt(x: number, z: number): number {

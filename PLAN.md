@@ -90,19 +90,33 @@ Notes for phase 1:
 - The Claude in Chrome extension and the Playwright MCP bridge were not connected, so browser checks ran through
   `playwright-core` from `../thelocalcode` driving the system Chrome.
 
-### Phase 1: vertical slice, "Coastal Drive" (built 2026-10-26; exit check partly open)
+### Phase 1: vertical slice, "Coastal Drive" (done 2026-10-26, except the demo link)
 The whole vision in one place. Exit: 30 minutes of autodrive with no gaps or hitches; 60 fps on Medium; all three
 brands seen in the first five minutes; it boots on one recent phone at Low (a smoke test only); a demo link to share.
 
 Exit status (2026-10-26):
-- 30 min autodrive: not proven yet. The soak (`?debug&play&t=8`, then Q) ran for 55 min of wall time, but the Mac
-  idle-slept through most of it, so only about 8 min of real driving (about 10 km) happened. In that time there were
-  no errors, 60 fps, and a worst frame of 18.5 ms. The car drove on after 14 sleep/wake cycles. Rerun it under
-  `caffeinate -i` for a clean 30 min.
-- 60 fps on Medium: yes, in headless Chrome at 1280×720 (WebGPU, about 200 draws and 0.9M triangles). Not yet checked
-  on the user's own display.
-- All three brands in the first five minutes: not measured. It needs the car's path every second, not every 20 s.
-- Phone at Low: boots and autodrives at 79 km/h in a 390×844 emulation. Not tried on a real phone.
+- 30 min autodrive: done. A 30-minute soak of the production build (1440×900 @2x, under `caffeinate`) drove 37.4 km
+  from 08:00 to 23:00 with no gaps and no errors: 60 fps median and at the 1st percentile; 62 of 107,941 frames over
+  25 ms and 10 over 50 ms (worst 187 ms, with no JS work behind it, while builds ran alongside). Lane keeping: median
+  2.0 m from the centreline (the right lane's middle), 95% within 1.5–2.5 m. Tools: `?debug` keeps every frame over
+  25 ms with where its time went (`puzzlecafe.slow`, `puzzlecafe.totals`).
+- The hitches the user felt while driving, found with that log and CPU profiles, and fixed:
+  - The environment re-bake made a new PMREM texture every ~7 s near sunset, which recompiled every lit material
+    (250–370 ms). It now re-bakes into the same target.
+  - three.js builds shaders once per InstancedMesh (its cache key holds the uuid), so each new chunk's plants
+    stalled 50–120 ms. Plants are now plain meshes with an InstancedBufferGeometry and per-instance attributes, all
+    sharing one shader.
+  - A rebase moved thousands of colliders one by one (~69 ms). Each tile's colliders now hang off one fixed body.
+  - First sight of a café, station, wall or plant compiled its shader. A warm-up compiles them behind the landing.
+  - Starting the AudioContext blocked ~130 ms on the first key. It is created at load and resumed on the first key.
+- The map lag: tiles are drawn by two workers into cached bitmaps (`src/mapworker.ts`), so panning and zooming only
+  move pictures; the 3D scene is not rendered while the map covers it; POI road clearance uses the bucketed index
+  (exact under 32 m, checked identical on three seeds), so map data for a screen at 24 m/px went from 1.2 s to 0.1 s.
+  Zoom 3–48 m/px about the pointer; a coarser tile stands in while a finer one loads; badges become dots, then hide.
+- 60 fps on Medium: yes, in Chrome at 1440×900 @2x (like a Retina laptop).
+- All three brands in the first five minutes: within 250 m in 4.1 minutes (paperboxd at once, a hoarding by the spawn,
+  and a café at 2 min; stickynotes 1.4 min; thelocalcode 4.1 min). Passing within 40 m of each takes 6.4 minutes.
+- Phone at Low: boots and autodrives in a 390×844 emulation. Not tried on a real phone.
 - Demo link: needs a deploy, which is the user's call (their other sites are on Vercel).
 
 Steps (each is ticked here when done, so a new session can resume):
@@ -213,13 +227,116 @@ Design (worked out 2026-10-26; the constants are starting points to tune):
   - Verified r186 exports: `RenderPipeline`, `bloom(node, strength, radius, threshold)`, `viewportLinearDepth`,
     `linearDepth`, `fwidth`, `mx_noise_float`, `vertexColor`, `positionWorld`, `time`.
 
-### Phase 2: more places (pending)
-A garage of the art-bible cars (classic coupes, a convertible), via Weave image-to-3D or bought models.
-Mountains (ridged terrain, switchbacks, snow line, guardrails), countryside and forest, a desert highway; blending
-between places; region names; highway and local road tiers; seasons (palettes, snow cover); weather (rain, snow, fog);
-a choose-a-place menu and fast travel; café variants; stickynotes map pins.
+### Phase 2: the look, then more places (in progress)
+The user, 2026-10-26, after driving Phase 1: "the graphics are not yet how it looks in those generated images on
+figma". So the coast is brought up to the concept art first (C1 golden hour is the hero shot, `art-src/concepts/
+coast-c1.jpg`; C3 midday, C4 overcast and C5 blue hour are in the Figma art bible), and new places come after, built
+to the same standard. Each step is checked side by side with the concept at the same time of day: the C1 framing is
+`?at=-3535,-207,-1.83&t=17.6` (a cliff stretch of the coast road heading west, sea on the right).
 
-Exit: each place is recognisable from one screenshot; transitions are seamless.
+Steps (first passes landed 2026-10-26; comparison frames from `?at=` spots, see the scratch scripts' notes below):
+- [x] 2.1 Atmosphere: fog takes the colour of the sky behind it (the baked environment, blurred and capped so the sun
+      cannot white it out); haze thicker at dawn and dusk and total at the tiles' edge; clouds (fractal noise on a
+      dome, fair-weather, lit by the sun, pink in twilight); the clock runs at about half speed around sunrise and
+      sunset; the sky (turbidity 2, rayleigh 2.5) dims as the sun climbs and the visible sky is repainted blue by day
+      (pale low, deep high), since this sky model whites out at noon; twilight is a violet dome with a warm band
+      toward the set sun, and blue hour is lit by the sky; after tone mapping, a CDL grade and a vignette.
+- [x] 2.2 Ground: olive grass, golden dry patches, mottling and grain, strata on steep rock, wet sand at the waterline,
+      anchored to the world. To do: the strata read as stripes on sandy sea cliffs; junction patches look too big.
+- [x] 2.3 Plants: Mediterranean coast (scrub on ~27% of 7 m cells, olives, cypresses, the odd pine); lumpy faceted
+      shapes that darken toward the base; wind sway in the shared shader (shadows sway too).
+- [x] 2.4 Roadside: dry-stone walls (blocks ~1 × 0.45 m, 0.9 m high) on the sea side of the coast road where the
+      ground drops 2 m within 12 m of the edge, with colliders, open at junctions, cafés and stations; asphalt grain,
+      wheel tracks, worn paint; bushes now grow up to the shoulder (6.5 m from the centre; trees and rocks 11 m).
+      Road signs, made with the chunk in the worker (`signs()` in `chunk.ts`, faces in `props.ts`, pole colliders):
+      "café 100 m →" with the paperboxd logo and "FUEL 100 m →" 90 m before each café and station on the driver's
+      right both ways, the blue coast-road sign of the concepts every ~600 m of coast road, chevrons on the outside of
+      bends turning over 17° within ±24 m (none on today's gentle roads; they are for mountain switchbacks). Faces
+      catch the headlights at night.
+- [x] 2.5 Café and station dressing: the café after the concept art (`props.ts`: pale stone front, a deep glass room of
+      bookshelves and pendant lamps, dark fascia letters that glow at night, a raised terrace with eight tables,
+      parasols, planters, string lights, lamp posts; merged per material, ~12 draws). The station: a white canopy
+      with a teal band and a lit underside, pumps with crowns, screens and hoses, a shop with a glass front of book
+      shelves, a FUEL totem with price rows, kerbs, planters; pump islands stay where `atPump` looks.
+- [ ] 2.6 The garage: for now a procedural roadster after the art-bible cars (`src/car.ts`: extruded profile with wheel
+      arches, clear-coated paint, open cockpit, windscreen, lamps; `?car=champagne|green|silver|red`). Real models
+      (Weave image-to-3D, about 53 credits a car with Tripo) wait for the user's go; then a car picker on the landing.
+- [x] 2.7 Sea: surf lines rolling onto beaches; turquoise over sand deepening to blue offshore; ripples in the normals
+      (not the surface) break the sun into glitter near the car and fade by 260 m, where they would alias into moiré.
+- [x] 2.10 Brand posters in each product's own style. The user, 2026-10-26: "thelocalcode posters are very bad, make
+      them using the art style and design style we followed in thelocalcode codebase too, that is one of my best
+      design work". Done 2026-10-26: composed from thelocalcode's own assets, tokens and words rather than generated:
+      (1) the Mac with the real stickynotes site on its screen, the poking hand, "Built like a product, not a
+      template."; (2) the Tangle idea, five vendors' cables against "With us, it's one straight line." from "you" to a
+      lit bulb. Fraunces, Bricolage Grotesque, ink outlines, hard shadows, cream. `node
+      art-src/posters/thelocalcode.mjs` remakes them (masters in `art-src/posters/`, 1024×512 in `public/brands/`).
+      Also: plants keep 22 m clear of hoardings so no tree hides a board; the big board's post stands behind it.
+- [x] 2.8 Ground cover: tufts of dry grass (two-sided blades, golden tips), yellow broom and lavender (near the sea) on
+      a 3 m grid within 45 m of roads, clear of sand, rock and props; ~720 per chunk through the shared instanced
+      plant shader, no shadows. With it: 60 fps, ~2.2M triangles, ~276 draws (1440×900 @2x, Medium).
+- [ ] 2.9 More places. Done (2.9a, 2026-10-26):
+      - Places come from two climate fields at the scale of a long drive (`fields.ts`): mountain ranges (30 km
+        noise) and deserts (34 km), each tens of km across. They lift continentalness, so each is one landmass, and
+        the Mediterranean coast and its islands lie between them; countryside is the land in between (C ≥ 0.18).
+        Spawn stays on the coast ("Cypress Bay"); countryside 1.4 km, mountains 2.2 km, desert 11 km from it.
+      - Mountains: the land rises 260 m over many km (a wider span of the same field, so roads climb gently), and
+        ridged peaks up to 250 m stand on top, fading out over the whole ~200 m the world knows of roads (squared),
+        so each road runs up a valley; conifers to the tree line (~420 m), meadow grass, more rock, snow from
+        ~430 m on slopes it can lie on, lavender for alpine flowers. Desert: flatter hills, dunes, sand and red
+        rock, no trees, sparse dry grass.
+      - Inland roads ease their heights over ±150 m (ends pinned, so junctions still meet); inland of C 0.2 the land
+        rises at 60 m per unit of C instead of 150. Road grades: median 3.7%; short ramps up to ~25% remain where
+        inland roads leave the coast.
+      - Region names (`world/places.ts`): ~9 km jittered cells named by the kind of country at their centre
+        ("Lavender Coast", "Willow Vale", "Granite Peaks", "Ochre Mesa"); the name fades in at the top of the screen
+        on entering a region; the map shows names when zoomed out, colours the land by kind (snow, desert) and
+        hill-shades it.
+      - Travel: the map has Coast, Countryside, Mountains and Desert buttons; each starts the drive again on the
+        nearest road of that kind (`findPlace`, ~25 ms) at the same hour. `?place=coast|country|mountains|desert`
+        (with `&from=x,z`) does the same, and the landing page links to all three inland kinds.
+      - Cafés inland too: halfway along a grid road, 10% of the time (stations 12%), each in the style of its
+        country (the worker tags it with the biome): the coast's stone café, a brick farmhouse with a red tiled
+        pitched roof, a timber mountain lodge with a slate roof, an adobe desert diner. Same terrace, books and sign.
+      - Desert: flat-topped mesas up to ~55 m (red rock on their sides, from the slope rule) and saguaro cacti.
+      - Weather (`src/weather.ts`): clear, cloudy, fog, rain or snow, a new spell every ~7 min drawn for the place
+        (rarely rain in the desert, snow instead of rain above 300 m in the mountains), fading over ~30 s; N steps to
+        the next, `?weather=` starts in one. Shared uniforms: cloud cover (thicker, greyer clouds; the sky turns a
+        soft grey; the sun dims and its shadows fade; skylight fills in), mist (haze), wet (rain streaks; the road
+        darkens and shines; a rain hiss), snow (soft round flakes) and snow lying on level ground, building while it
+        snows and melting after. Drops fall through a 50 m box that wraps around the camera, so they stay put in the
+        world; none within ~2 m of the camera.
+      - Seasons (in `weather.ts`): spring, summer, autumn, winter, one a game day (a year in ~3.5 hours of driving),
+        each blending into the next over its last third; G skips ahead, `?season=` starts in one, and a new season
+        is announced like a region. The ground takes the season's tint (fresh green, golden, golden-brown, grey); leafy
+        parts of plants (a per-vertex weight: broadleaf canopies, scrub, broom, grass; not conifers, cypresses, olives,
+        rocks or cacti) turn orange to red in autumn, each plant its own, and dull brown in winter; in winter snow lies
+        on level ground where it is cold, a per-vertex weight from the terrain (inland, not desert), so the coast and
+        the desert stay clear; roads stay ploughed.
+      - stickynotes map pins (`map.ts`): sticky notes in the stickynotes extension's four highlighter colours (yellow
+        `#f2d14b`, pink `#ef8fb7`, blue `#86b6ea`, green `#93cf8c`), picked from swatches beside the travel buttons.
+        Click the map to pin the nearest road (right lane, facing along it: `roadNear` in `places.ts`, which
+        `findPlace` now uses too); click a pin to drive there; right-click or ctrl-click takes it off. Pins and the
+        chosen colour are kept in localStorage (`puzzlecafe.pins`, `puzzlecafe.ink`); without it they last the visit.
+        Travelling (pins or buttons) keeps the hour and the season.
+      - Road tiers (`roads.ts`): every third grid line is a highway (~3 km cells; ~40% of inland road): always
+        built, nodes barely jittered across it so it runs nearly straight, 3.5 m lanes with 2.5 m shoulders (half
+        width 6.2 m, edge lines inset at the lane edge). The rest are local roads: half width 3.3 m, too narrow for
+        edge lines, centre dashes only. The coast road is unchanged (4 m). Each `Road` and `Junction` carries `half`;
+        `RoadIndex` distances are measured from the asphalt edge plus ROAD_HALF, so carving, verges, plant and POI
+        clearance scale with width; junction patches fit their widest road; `laneOf(r)` centres the car in narrow
+        lanes (autodrive, pins, rescue). The map draws highways wider in warm yellow.
+      - Guardrails (`chunk.ts` `barriers()`): steel W-beam guardrails on posts every 4 m along inland roads where the
+        ground drops 3 m within 12 m of the edge (either side; ends dip into the ground; colliders), stone walls on the
+        coast road as before (2 m). Built along whole roads and kept per owned segment, so runs and stone courses carry
+        across chunk edges. About 3% of countryside and 4–5% of mountain roadsides; chunk builds stay ~11 ms.
+      To do: switchbacks. Idea: some mountain local edges become passes; the middle of the edge zigzags (legs ~40 m
+      apart, ~9% grade, hairpins ~20 m radius) over a ridge H(u) along the edge axis, and the terrain gets the same
+      ridge (a pure `passLift(x, z)` added to the smooth height), otherwise the carving blends to the valley floor
+      between legs and they stand on embankments. Bend signs and guardrails then follow from existing rules;
+      autodrive already slows for sharp bends. Then the exit check below.
+
+Exit: next to C1, C3 and C5 at the same time of day, a viewer reads it as the same place; each new place is
+recognisable from one screenshot and transitions are seamless; 60 fps on Medium.
 
 ### Phase 3: dystopian city (pending)
 Street grids inside a settlement's radius; procedural brutalist towers from instanced modules; LED and neon
@@ -243,12 +360,11 @@ Photo mode, tunnels and bridges, interiors, multiplayer, shared sticky notes. No
 decision.
 
 ## Next steps
-- Nothing since `1bd958b physics and tests` is committed. Commit Phase 1 once the user says so.
-- Finish the Phase 1 exit check:
-  - Run a clean 30 min soak under `caffeinate -i`, logging the car's position every second.
-  - From that path, work out the lane offset (`world.area(cx, cz).index.closest`).
-  - From the same path, work out the brands passed in the first five minutes (hoarding POIs within about 40 m of the
-    path; brand from `posterFor(pick)`).
-- The user drives it on their own machine: `npm run dev`, then http://localhost:5173 (add `?play` to skip the landing).
+- Nothing since `1bd958b physics and tests` is committed. Commit once the user says so.
+- Phase 2, the biggest gaps to the concepts, in order: the car (real models need the user's go on Weave credits);
+  cliffs and a coast road high above the sea (terrain shape); planting dense right up to the road; cafés and
+  hoardings close to the road as in the concepts; road signs and lamps; villages on the hills.
 - Decide where to deploy the demo link (Vercel, like the user's other sites), then deploy.
-- Then Phase 2.
+- Checking the look: comparison frames come from `?play&at=-3535,-207,-1.83&t=17.55` (C1), `t=12.5` (C3),
+  `t=18.45` (C5), and the café at `?play&at=-1618,1315,-2.52&t=17.4` / `t=20.5`. Hitches: `?debug`, then read
+  `puzzlecafe.slow` (each slow frame with its parts: drive, physics, world, camera, light, tiles, render).

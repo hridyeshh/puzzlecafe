@@ -34,6 +34,15 @@
       #help { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 4px; font: 13px/1.4 system-ui, sans-serif; pointer-events: none; }
       #help kbd { display: inline-block; min-width: 34px; margin-right: 8px; color: var(--dim); font: 600 12px/1.4 ui-monospace, monospace; }
       #map { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+      #travel { position: fixed; right: 16px; top: 12px; display: flex; gap: 8px; }
+      #travel button { font: 600 13px system-ui, sans-serif; color: var(--ink); background: var(--glass); backdrop-filter: blur(10px); border: 1px solid var(--track); border-radius: 999px; padding: 8px 14px; cursor: pointer; }
+      #travel button:hover { background: rgb(12 14 18 / 0.75); }
+      #travel .inks { display: flex; align-items: center; gap: 7px; padding: 0 4px 0 6px; }
+      #travel .inks button { width: 22px; height: 22px; padding: 0; border: 2px solid transparent; border-radius: 3px 3px 7px 3px; rotate: -4deg; box-shadow: 0 2px 6px rgb(0 0 0 / 0.35); }
+      #travel .inks button[aria-pressed='true'] { border-color: #ffffff; rotate: 0deg; }
+      #place { position: fixed; top: 9vh; left: 50%; transform: translateX(-50%); font: 600 clamp(28px, 4vw, 46px) ui-serif, Georgia, serif; letter-spacing: 0.02em; text-shadow: 0 2px 14px rgb(0 0 0 / 0.5); pointer-events: none; opacity: 0; white-space: nowrap; }
+      #place.show { animation: place 5s ease forwards; }
+      @keyframes place { 0% { opacity: 0; } 12%, 70% { opacity: 1; } 100% { opacity: 0; } }
 
       #landing { position: fixed; inset: 0; z-index: 10; display: grid; align-items: end; background: var(--night); }
       #landing .hero { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -69,6 +78,7 @@
         </p>
         <button id="start">Start driving</button>
         <p class="keys">W A S D to drive · Q autodrive · M map · H all controls</p>
+        <p class="keys">Or start in the <a href="?play&amp;place=country">countryside</a>, the <a href="?play&amp;place=mountains">mountains</a> or the <a href="?play&amp;place=desert">desert</a>.</p>
         <p class="keys" id="touch" hidden>Made for a computer with a keyboard. On a phone the car drives itself.</p>
       </div>
     </main>

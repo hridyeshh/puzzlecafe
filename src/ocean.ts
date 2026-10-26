@@ -3,6 +3,7 @@ import * as THREE from 'three/webgpu';
 import {
   cameraFar,
   cameraNear,
+  cameraPosition,
   color,
   cos,
   float,
@@ -11,6 +12,7 @@ import {
   mix,
   mx_noise_float,
   positionLocal,
+  positionWorld,
   sin,
   smoothstep,
   time,
@@ -51,13 +53,28 @@ export function createOcean() {
     nz = nz.sub(c.mul((dz / l) * k * amp));
   }
 
+  // Ripples too small to move the surface, only to tilt it: they break the sun into glitter near the car. They fade out
+  // with distance, where such short waves would alias into a moiré.
+  const near = smoothstep(260, 60, positionWorld.sub(cameraPosition).length());
+  for (const [dx, dz, length, amp] of [[0.3, 0.95, 4.1, 0.06], [-0.85, 0.5, 2.7, 0.04]]) {
+    const k = (2 * Math.PI) / length;
+    const c = cos(xz.x.mul(dx * k).add(xz.y.mul(dz * k)).sub(time.mul(Math.sqrt(9.81 * k)))).mul(near);
+    nx = nx.sub(c.mul(dx * k * amp));
+    nz = nz.sub(c.mul(dz * k * amp));
+  }
+
   const material = new THREE.MeshStandardNodeMaterial({ roughness: 0.05, metalness: 0, transparent: true });
   material.positionNode = positionLocal.add(lift);
   material.normalNode = transformNormalToView(vec3(nx, ny, nz).normalize());
   // Metres of water between the surface and whatever is behind it along the view ray.
   const depth = viewportLinearDepth.sub(linearDepth()).mul(cameraFar.sub(cameraNear));
-  const foam = smoothstep(1.2, 0, depth).mul(mx_noise_float(vec3(xz.mul(0.35), time.mul(0.6))).mul(0.5).add(0.5));
-  material.colorNode = mix(color(0x2f8f9a), color(0x0b3a52), smoothstep(0, 10, depth)).add(foam.mul(0.6));
+  // Foam where the water thins at the shore, and surf lines that roll in toward the beach.
+  const surf = smoothstep(0.72, 1, sin(depth.mul(2.2).sub(time.mul(1.3)))).mul(smoothstep(3.5, 0.6, depth));
+  const churn = mx_noise_float(vec3(xz.mul(0.35), time.mul(0.6))).mul(0.5).add(0.5);
+  const foam = max(smoothstep(1.2, 0, depth), surf.mul(0.8)).mul(churn);
+  // Turquoise over sand, deepening to blue offshore, as in the concept art.
+  const water = mix(mix(color(0x3cb9ba), color(0x1a7d9e), smoothstep(0, 5, depth)), color(0x0b3f6e), smoothstep(5, 16, depth));
+  material.colorNode = water.add(foam.mul(0.6));
   material.opacityNode = max(smoothstep(0, 1.6, depth).mul(0.92), foam);
 
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS).rotateX(-Math.PI / 2), material);

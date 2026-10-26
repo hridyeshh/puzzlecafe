@@ -5,7 +5,8 @@ import { CHUNK } from './world/chunk.ts';
 import { LANE } from './world/roads.ts';
 import { makeWorld } from './world/world.ts';
 
-// A coast T-junction near the spawn, and a point in the right lane of the coast road 40 m before it.
+// A coast T-junction near the spawn, and a point in the right lane of the coast road 40 m before it, coming from the
+// side from which its road is a turn rather than a U-turn.
 const world = makeWorld(1);
 const start = world.spawn();
 function approach() {
@@ -13,13 +14,19 @@ function approach() {
     for (let dz = -6; dz <= 6; dz++) {
       const area = world.area(Math.floor(start.x / CHUNK) + dx, Math.floor(start.z / CHUNK) + dz);
       for (const j of area.junctions) {
+        const ends = area.roads.flatMap((s) => (s.coast ? [] : [[s, 0, 1], [s, s.x.length - 1, s.x.length - 2]] as const));
+        const end = ends.find(([s, e]) => Math.hypot(s.x[e] - j.x, s.z[e] - j.z) < 3);
+        if (!end) continue;
+        const [s, e, n] = end;
         for (const r of area.roads) {
           if (!r.coast) continue;
           const k = r.x.findIndex((x, i) => Math.hypot(x - j.x, r.z[i] - j.z) < 6);
-          if (k < 6) continue;
-          const b = k - 5; // ~40 m back, heading toward the junction
-          const tx = r.x[b + 1] - r.x[b];
-          const tz = r.z[b + 1] - r.z[b];
+          if (k < 6 || k + 6 >= r.x.length) continue;
+          // Head along the coast road the way the side road leaves it.
+          const sign = (r.x[k + 1] - r.x[k - 1]) * (s.x[n] - s.x[e]) + (r.z[k + 1] - r.z[k - 1]) * (s.z[n] - s.z[e]) > 0 ? 1 : -1;
+          const b = k - 5 * sign; // ~40 m back, heading toward the junction
+          const tx = r.x[b + sign] - r.x[b];
+          const tz = r.z[b + sign] - r.z[b];
           const l = Math.hypot(tx, tz);
           return { x: r.x[b] - (tz / l) * LANE, z: r.z[b] + (tx / l) * LANE, yaw: Math.atan2(tx, tz) };
         }

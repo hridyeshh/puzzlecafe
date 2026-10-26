@@ -32,9 +32,9 @@ export async function createWorld(): Promise<RAPIER.World> {
 }
 
 /** A static heightfield for one chunk. Rapier centres heightfields on the collider, so pass the chunk's centre. */
-export function addTerrain(world: RAPIER.World, heights: Float32Array, centreX: number, centreZ: number): RAPIER.Collider {
+export function addTerrain(world: RAPIER.World, heights: Float32Array, centreX: number, centreZ: number, parent?: RAPIER.RigidBody): RAPIER.Collider {
   const desc = RAPIER.ColliderDesc.heightfield(RES, RES, heights, { x: CHUNK, y: 1, z: CHUNK }, RAPIER.HeightFieldFlags.FIX_INTERNAL_EDGES);
-  return world.createCollider(desc.setTranslation(centreX, 0, centreZ));
+  return world.createCollider(desc.setTranslation(centreX, 0, centreZ), parent);
 }
 
 export type Car = ReturnType<typeof createCar>;

@@ -1,7 +1,7 @@
 // Places along roads: paperboxd cafés, petrol stations and hoardings. Anchored to road geometry, so pure and local.
 import { COAST_C, type Fields } from './fields.ts';
 import { hash } from './hash.ts';
-import { ROAD_HALF, type Junction, type Road, type RoadIndex, gradient } from './roads.ts';
+import { ROAD_HALF, type Junction, type Near, type Road, type RoadIndex, gradient } from './roads.ts';
 
 export type PoiKind = 'cafe' | 'station' | 'hoarding';
 
@@ -51,6 +51,7 @@ export function placePois(
 ): Poi[] {
   const out: Poi[] = [];
   const seen = new Set<number>();
+  const near: Near = { d: 0, h: 0 };
   // side +1 puts the POI along the road's across direction (nx, nz), -1 opposite
   const place = (kind: PoiKind, ax: number, az: number, ah: number, nx: number, nz: number, side: number, pick: number) => {
     if (ax < x0 || ax >= x1 || az < z0 || az >= z1 || seen.has(pick)) return;
@@ -59,7 +60,8 @@ export function placePois(
     const sz = nz * side;
     const x = ax + sx * SETBACK[kind];
     const z = az + sz * SETBACK[kind];
-    if (index.dist(x, z) < PAD[kind] + ROAD_HALF + 4) return; // would stand on another road
+    // Would stand on another road. Under 32 m, so the bucketed query is exact (a full scan made big maps slow).
+    if (index.near(x, z, near).d < PAD[kind] + ROAD_HALF + 4) return;
     let yaw: number;
     if (kind === 'hoarding') {
       // Drivers with the board on their right travel along (sz, -sx); it faces them, turned toward the road.
@@ -99,15 +101,15 @@ export function placePois(
         }
       }
     } else if (r.x.length >= 12) {
-      // Inland roads: a station halfway along, hoardings a quarter of the way in from each end.
+      // Inland roads: a station or a café halfway along, hoardings a quarter of the way in from each end.
       for (let slot = 0; slot < 3; slot++) {
         const k = Math.floor((r.x.length * (slot + 1)) / 4);
         const key = hash(f.seed, r.id, slot);
         const roll = key / 4294967296;
         const side = key & 512 ? 1 : -1;
-        if (slot === 1 ? roll < 0.12 : roll < 0.5) {
-          place(slot === 1 ? 'station' : 'hoarding', r.x[k], r.z[k], r.h[k], r.nx[k], r.nz[k], side, key);
-        }
+        // Halfway along: a station, or a paperboxd café (a lodge in the mountains, a diner in the desert, see props).
+        const kind = slot !== 1 ? (roll < 0.5 ? 'hoarding' : null) : roll < 0.12 ? 'station' : roll < 0.22 ? 'cafe' : null;
+        if (kind) place(kind, r.x[k], r.z[k], r.h[k], r.nx[k], r.nz[k], side, key);
       }
     }
   }

@@ -1,21 +1,26 @@
 // Terrain tile vertices from a sampled grid: positions, normals and colours, and a skirt that hides LOD cracks.
 // Pure (no three.js), so workers build it.
-import { CHUNK } from './world/chunk.ts';
+import { CHUNK, type Grid } from './world/chunk.ts';
 import { smoothstep } from './world/fields.ts';
 import { ROAD_HALF } from './world/roads.ts';
 
 const SKIRT = 12; // m a tile's skirt hangs below its edge
 // linear RGB
 const SAND = [0.47, 0.4, 0.28];
-const GRASS = [0.17, 0.27, 0.09];
-const DRY = [0.36, 0.33, 0.16];
+const GRASS = [0.2, 0.27, 0.085]; // olive, Mediterranean
+const DRY = [0.42, 0.36, 0.15]; // golden, late summer
 const ROCK = [0.32, 0.3, 0.27];
 const GRAVEL = [0.26, 0.24, 0.21];
+const MEADOW = [0.15, 0.25, 0.1]; // mountain grass
+const SNOW = [0.8, 0.83, 0.88];
+const DESERT = [0.6, 0.44, 0.27];
+const RED_ROCK = [0.48, 0.26, 0.16];
 
 export interface TileMesh {
   position: Float32Array; // relative to the tile centre
   normal: Float32Array;
   color: Float32Array;
+  cold: Float32Array; // 0–1 per vertex: where winter's snow can lie (inland, not desert)
 }
 
 /** Grid vertices around a tile's edge, in order: 4·res of them. The skirt hangs from these. */
@@ -34,7 +39,7 @@ function perimeter(res: number): number[] {
  * Coarse tiles get a skirt; full-detail tiles don't, because they cast shadows and only meet seamless neighbours or
  * coarse ones whose skirts already cover the crack.
  */
-export function terrainMesh(heights: Float32Array, cont: Float32Array, roadDist: Float32Array, res: number, skirt: boolean): TileMesh {
+export function terrainMesh({ heights, cont, roadDist, alpine, arid }: Grid, res: number, skirt: boolean): TileMesh {
   const n = res + 3;
   const m = res + 1;
   const step = CHUNK / res;
@@ -43,6 +48,7 @@ export function terrainMesh(heights: Float32Array, cont: Float32Array, roadDist:
   const position = new Float32Array(count * 3);
   const normal = new Float32Array(count * 3);
   const color = new Float32Array(count * 3);
+  const cold = new Float32Array(count);
   const c = [0, 0, 0];
   const toward = (to: number[], t: number) => {
     for (let i = 0; i < 3; i++) c[i] += (to[i] - c[i]) * t;
@@ -61,14 +67,22 @@ export function terrainMesh(heights: Float32Array, cont: Float32Array, roadDist:
       normal[v] = -dx * ny;
       normal[v + 1] = ny;
       normal[v + 2] = -dz * ny;
-      // Grass drying out uphill, sand by the sea, rock on steep ground, gravel along the road edges.
+      // Grass drying out uphill, mountain meadows, desert sand, sand by the sea, rock on steep ground (more of it in
+      // the mountains, red in the desert), snow up high where it can lie, gravel along the road edges.
+      const a = alpine[at];
+      const d = arid[at];
+      const steep = 1 - ny;
       c[0] = GRASS[0];
       c[1] = GRASS[1];
       c[2] = GRASS[2];
-      toward(DRY, smoothstep(50, 130, h));
+      toward(DRY, smoothstep(50, 130, h) * (1 - a));
+      toward(MEADOW, a);
+      toward(DESERT, d);
       toward(SAND, (1 - smoothstep(1.5, 4, h)) * (1 - smoothstep(0.03, 0.06, cont[at])));
-      toward(ROCK, smoothstep(0.12, 0.25, 1 - ny));
+      toward(d > 0.5 ? RED_ROCK : ROCK, smoothstep(0.12 - 0.05 * a, 0.25 - 0.08 * a, steep));
+      toward(SNOW, smoothstep(400, 470, h) * (1 - smoothstep(0.3, 0.5, steep)));
       toward(GRAVEL, 1 - smoothstep(ROAD_HALF + 0.5, ROAD_HALF + 3, roadDist[at]));
+      cold[v / 3] = (1 - d) * smoothstep(0.12, 0.3, cont[at]);
       color[v] = c[0];
       color[v + 1] = c[1];
       color[v + 2] = c[2];
@@ -81,8 +95,9 @@ export function terrainMesh(heights: Float32Array, cont: Float32Array, roadDist:
     position[v + 1] -= SKIRT;
     normal.set(normal.subarray(g * 3, g * 3 + 3), v);
     color.set(color.subarray(g * 3, g * 3 + 3), v);
+    cold[m * m + k] = cold[g];
   });
-  return { position, normal, color };
+  return { position, normal, color, cold };
 }
 
 /** Triangles for a tile at `res`: the grid, then any skirt from both sides so it shows from anywhere. */

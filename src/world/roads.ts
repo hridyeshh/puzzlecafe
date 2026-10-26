@@ -1,9 +1,14 @@
 // Roads: the coast road follows a contour of continentalness; an inland grid of curved roads ends on it in T-junctions.
+// Every third grid line is a highway (~3 km cells): straighter, unbroken, with shoulders; the rest are narrow local roads.
 import { COAST_C, type Fields } from './fields.ts';
 import { hash, rand } from './hash.ts';
 
-export const ROAD_HALF = 4; // m: two 3.5 m lanes and their edge lines
+export const ROAD_HALF = 4; // m: two 3.5 m lanes and their edge lines (the coast road), the width distances assume
+export const HIGHWAY_HALF = 6.2; // m: the same lanes with 2.5 m shoulders
+export const LOCAL_HALF = 3.3; // m: narrow lanes, too narrow for edge lines
 export const LANE = ROAD_HALF / 2; // m from the centreline to the middle of a lane
+/** The middle of a lane on road `r`: LANE, or the middle of a local road's narrower lane. */
+export const laneOf = (r: { half: number }) => Math.min(LANE, r.half / 2);
 export const MS = 8; // m between road vertices, and the marching-squares step
 export const GRID = 1024; // m between inland road nodes
 const NODE_C = COAST_C + 0.03; // grid nodes stay this far inland of the coast road
@@ -14,6 +19,7 @@ const CELL = 32; // m buckets for nearest-road queries
 export interface Road {
   coast: boolean;
   id: number; // hash of the grid edge piece; 0 on the coast road
+  half: number; // m from the centreline to the edge of the asphalt
   x: number[];
   z: number[];
   h: number[];
@@ -25,12 +31,13 @@ export interface Junction {
   x: number;
   z: number;
   h: number;
+  half: number; // of the widest road meeting here
 }
 
 type Point = [number, number, number, number]; // x, z, unit tangent x, z
 
-function newRoad(coast: boolean, id: number): Road {
-  return { coast, id, x: [], z: [], h: [], nx: [], nz: [] };
+function newRoad(coast: boolean, id: number, half: number): Road {
+  return { coast, id, half, x: [], z: [], h: [], nx: [], nz: [] };
 }
 
 function add(f: Fields, r: Road, x: number, z: number, nx: number, nz: number) {
@@ -39,6 +46,32 @@ function add(f: Fields, r: Road, x: number, z: number, nx: number, nz: number) {
   r.h.push(f.smooth(x, z));
   r.nx.push(nx);
   r.nz.push(nz);
+}
+
+const EASE = 150; // m either side over which an inland road's heights are averaged
+
+/**
+ * An inland road's heights, averaged over ±EASE m along it with its ends pinned: the land's bumps (sharpened by the
+ * coastline's warp, and stacked on the climb into the mountains) would otherwise make ramps of 20% and more.
+ * Ends stay put, so junctions and the coast road's T-junctions still meet exactly.
+ */
+function ease(r: Road) {
+  const n = r.x.length;
+  if (n < 3) return;
+  const s = [0];
+  for (let k = 1; k < n; k++) s.push(s[k - 1] + Math.hypot(r.x[k] - r.x[k - 1], r.z[k] - r.z[k - 1]));
+  const total = s[n - 1];
+  const out = r.h.slice();
+  let lo = 0;
+  let hi = 0;
+  let sum = 0;
+  for (let k = 0; k < n; k++) {
+    while (hi < n && s[hi] <= s[k] + EASE) sum += r.h[hi++];
+    while (s[lo] < s[k] - EASE) sum -= r.h[lo++];
+    const pin = Math.min(1, Math.min(s[k], total - s[k]) / EASE);
+    out[k] = r.h[k] + (sum / (hi - lo) - r.h[k]) * pin;
+  }
+  r.h = out;
 }
 
 /** Unit direction in which continentalness grows (inland). */
@@ -106,7 +139,7 @@ export function traceCoast(f: Fields, x0: number, z0: number, x1: number, z1: nu
   const roads: Road[] = [];
   const seen = new Set<number>();
   const walk = (start: number) => {
-    const r = newRoad(true, 0);
+    const r = newRoad(true, 0, ROAD_HALF);
     let prev = -1;
     let e = start;
     while (e >= 0) {
@@ -154,15 +187,18 @@ export function makeRoads(f: Fields) {
   const seed = f.seed;
   const edges = new Map<string, Edge>();
 
+  // Highways run along every third grid line; their nodes barely move across them, so they run nearly straight.
+  const major = (n: number) => ((n % 3) + 3) % 3 === 0;
+  const highway = (i: number, j: number, dir: number) => major(dir === 0 ? j : i);
   const nodeAt = (i: number, j: number): [number, number] => [
-    (i + 0.5 + (rand(seed, i, j, 11) - 0.5) * 0.6) * GRID,
-    (j + 0.5 + (rand(seed, i, j, 12) - 0.5) * 0.6) * GRID,
+    (i + 0.5 + (rand(seed, i, j, 11) - 0.5) * (major(i) ? 0.12 : 0.6)) * GRID,
+    (j + 0.5 + (rand(seed, i, j, 12) - 0.5) * (major(j) ? 0.12 : 0.6)) * GRID,
   ];
   const land = (i: number, j: number) => {
     const [x, z] = nodeAt(i, j);
     return f.continent(x, z) > NODE_C;
   };
-  const base = (i: number, j: number, dir: number) => rand(seed, i, j, 20 + dir) < EDGE_P;
+  const base = (i: number, j: number, dir: number) => highway(i, j, dir) || rand(seed, i, j, 20 + dir) < EDGE_P;
   // A node's four edges as [i, j, dir]: +x, +z, -x, -z.
   const around = (i: number, j: number) => [[i, j, 0], [i, j, 1], [i - 1, j, 0], [i, j - 1, 1]];
   // Edges a node adds so it is no dead end. Decided from base edges only, so both ends of an edge agree.
@@ -232,17 +268,19 @@ export function makeRoads(f: Fields) {
 
     // Keep the stretches on land that reach a land node, cut exactly at the coast road.
     const id = hash(seed, i, j, 40 + dir);
+    const half = highway(i, j, dir) ? HIGHWAY_HALF : LOCAL_HALF;
     const edge: Edge = { pieces: [], boxes: [], tees: [] };
     let run: Point[] = [];
     let tees: Point[] = [];
     let fromNode = false;
     const finish = (toNode: boolean) => {
       if (run.length > 1 && (fromNode || toNode)) {
-        const r = newRoad(false, hash(seed, id, edge.pieces.length));
+        const r = newRoad(false, hash(seed, id, edge.pieces.length), half);
         for (const [x, z, tx, tz] of run) add(f, r, x, z, -tz, tx);
+        ease(r);
         edge.pieces.push(r);
         edge.boxes.push([Math.min(...r.x), Math.min(...r.z), Math.max(...r.x), Math.max(...r.z)]);
-        for (const [x, z] of tees) edge.tees.push({ x, z, h: f.smooth(x, z) });
+        for (const [x, z] of tees) edge.tees.push({ x, z, h: f.smooth(x, z), half: Math.max(half, ROAD_HALF) });
       }
       run = [];
       tees = [];
@@ -303,7 +341,9 @@ export function makeRoads(f: Fields) {
           for (const t of e.tees) if (inside(t.x, t.z)) junctions.push(t);
         }
         const [x, z] = nodeAt(i, j);
-        if (inside(x, z) && isJunction(i, j)) junctions.push({ x, z, h: f.smooth(x, z) });
+        if (!inside(x, z) || !isJunction(i, j)) continue;
+        const wide = around(i, j).some(([a, b, d]) => highway(a, b, d) && exists(a, b, d));
+        junctions.push({ x, z, h: f.smooth(x, z), half: wide ? HIGHWAY_HALF : LOCAL_HALF });
       }
     }
     return { roads, junctions };
@@ -312,7 +352,10 @@ export function makeRoads(f: Fields) {
   return { area, grid, nodeAt, land, exists };
 }
 
-/** Nearest road point: distance to the centreline and the road height there. */
+/**
+ * Nearest road point: distance and the road height there. The distance is from the edge of the asphalt plus ROAD_HALF,
+ * as if every road were the coast road's width, so the strip a road sits on, verges and clearances scale with it.
+ */
 export interface Near {
   d: number;
   h: number;
@@ -322,14 +365,14 @@ const cellKey = (gx: number, gz: number) => (gx + 1048576) * 2097152 + (gz + 104
 
 /** Road segments bucketed for nearest-road queries. */
 export class RoadIndex {
-  private seg: Float64Array; // ax, az, bx, bz, ah, bh per segment
+  private seg: Float64Array; // ax, az, bx, bz, ah, bh, extra half width per segment
   private cells = new Map<number, number[]>();
 
   constructor(roads: Road[]) {
     const s: number[] = [];
-    for (const r of roads) for (let k = 0; k + 1 < r.x.length; k++) s.push(r.x[k], r.z[k], r.x[k + 1], r.z[k + 1], r.h[k], r.h[k + 1]);
+    for (const r of roads) for (let k = 0; k + 1 < r.x.length; k++) s.push(r.x[k], r.z[k], r.x[k + 1], r.z[k + 1], r.h[k], r.h[k + 1], r.half - ROAD_HALF);
     this.seg = Float64Array.from(s);
-    for (let i = 0; i < s.length; i += 6) {
+    for (let i = 0; i < s.length; i += 7) {
       for (let gx = Math.floor(Math.min(s[i], s[i + 2]) / CELL); gx <= Math.floor(Math.max(s[i], s[i + 2]) / CELL); gx++) {
         for (let gz = Math.floor(Math.min(s[i + 1], s[i + 3]) / CELL); gz <= Math.floor(Math.max(s[i + 1], s[i + 3]) / CELL); gz++) {
           const key = cellKey(gx, gz);
@@ -356,11 +399,11 @@ export class RoadIndex {
     return out;
   }
 
-  /** The nearest road point anywhere in the index, with the road's direction there; null if there are no roads. */
-  closest(x: number, z: number): { x: number; z: number; h: number; tx: number; tz: number } | null {
+  /** The nearest road point anywhere in the index, with the road's direction and half width; null if there are no roads. */
+  closest(x: number, z: number): { x: number; z: number; h: number; tx: number; tz: number; half: number } | null {
     const out = { d: Infinity, h: 0 };
     let at = -1;
-    for (let i = 0; i < this.seg.length; i += 6) {
+    for (let i = 0; i < this.seg.length; i += 7) {
       const d = out.d;
       this.test(i, x, z, out);
       if (out.d < d) at = i;
@@ -372,13 +415,13 @@ export class RoadIndex {
     const l2 = dx * dx + dz * dz || 1;
     const t = Math.min(1, Math.max(0, ((x - s[at]) * dx + (z - s[at + 1]) * dz) / l2));
     const l = Math.sqrt(l2);
-    return { x: s[at] + dx * t, z: s[at + 1] + dz * t, h: out.h, tx: dx / l, tz: dz / l };
+    return { x: s[at] + dx * t, z: s[at + 1] + dz * t, h: out.h, tx: dx / l, tz: dz / l, half: s[at + 6] + ROAD_HALF };
   }
 
   /** Distance to the nearest road anywhere in the index. */
   dist(x: number, z: number): number {
     const out = { d: Infinity, h: 0 };
-    for (let i = 0; i < this.seg.length; i += 6) this.test(i, x, z, out);
+    for (let i = 0; i < this.seg.length; i += 7) this.test(i, x, z, out);
     return out.d;
   }
 
@@ -390,7 +433,7 @@ export class RoadIndex {
     const dz = s[i + 3] - az;
     const l2 = dx * dx + dz * dz;
     const t = l2 > 0 ? Math.min(1, Math.max(0, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
-    const d = Math.hypot(ax + dx * t - x, az + dz * t - z);
+    const d = Math.hypot(ax + dx * t - x, az + dz * t - z) - s[i + 6];
     if (d < out.d) {
       out.d = d;
       out.h = s[i + 4] + (s[i + 5] - s[i + 4]) * t;

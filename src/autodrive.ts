@@ -1,7 +1,7 @@
 // Autodrive: keeps the car in the right lane of the road it is on, slows for bends, picks a way at junctions.
 import type { Intent } from './physics.ts';
 import { CHUNK } from './world/chunk.ts';
-import { LANE, type Road } from './world/roads.ts';
+import { type Road, laneOf } from './world/roads.ts';
 import type { World } from './world/world.ts';
 
 const WHEELBASE = 2.65; // m, front to rear axle
@@ -100,14 +100,14 @@ export function createAutodrive(world: World) {
       let walked = 0;
       let turned = 0;
       let sharp = false;
-      let aim: [number, number, number, number] | null = null; // x, z, direction x, z
+      let aim: [number, number, number, number, number] | null = null; // x, z, direction x, z, lane
       let [dx, dz] = dir(r, k, sign);
       for (let step = 0; step < 60 && walked < look * 2; step++) {
         const vi = sign > 0 ? k + 1 : k;
         const gap = Math.hypot(r.x[vi] - px, r.z[vi] - pz);
         if (!aim && walked + gap >= look) {
           const t = (look - walked) / (gap || 1);
-          aim = [px + (r.x[vi] - px) * t, pz + (r.z[vi] - pz) * t, dx, dz];
+          aim = [px + (r.x[vi] - px) * t, pz + (r.z[vi] - pz) * t, dx, dz, laneOf(r)];
         }
         walked += gap;
         px = r.x[vi];
@@ -138,11 +138,11 @@ export function createAutodrive(world: World) {
         ({ r, k, sign } = next);
         [dx, dz] = [nx, nz];
       }
-      aim ??= [px, pz, dx, dz];
+      aim ??= [px, pz, dx, dz, laneOf(r)];
 
       // Pure pursuit on the middle of the right lane.
-      const tx = aim[0] - aim[3] * LANE - x; // right of (dx, dz) is (-dz, dx)
-      const tz = aim[1] + aim[2] * LANE - z;
+      const tx = aim[0] - aim[3] * aim[4] - x; // right of (dx, dz) is (-dz, dx)
+      const tz = aim[1] + aim[2] * aim[4] - z;
       const ahead = Math.hypot(tx, tz) || 1;
       const side = (tx * Math.cos(yaw) - tz * Math.sin(yaw)) / ahead; // sine of the angle to the aim, + is left
       const angle = Math.atan((2 * WHEELBASE * side) / ahead);

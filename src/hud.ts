@@ -7,6 +7,8 @@ const CONTROLS = [
   ['M', 'map'],
   ['C', 'camera'],
   ['T', 'skip an hour'],
+  ['N', 'next weather'],
+  ['G', 'next season'],
   ['Z', 'zen: endless fuel'],
   ['V', 'sound on/off'],
   ['R', 'back on the wheels'],
@@ -22,6 +24,8 @@ export function createHud() {
     '<div class="panel clock"></div>';
   const hint = document.body.appendChild(document.createElement('div'));
   hint.id = 'hint';
+  const title = document.body.appendChild(document.createElement('div'));
+  title.id = 'place';
   const help = document.body.appendChild(document.createElement('div'));
   help.id = 'help';
   help.innerHTML = CONTROLS.map(([key, what]) => `<div><kbd>${key}</kbd>${what}</div>`).join('');
@@ -45,6 +49,13 @@ export function createHud() {
       clock.textContent = `${String(Math.floor(hours)).padStart(2, '0')}:${String(Math.floor((hours % 1) * 60)).padStart(2, '0')}`;
       hint.textContent = message;
       hint.hidden = !message;
+    },
+    /** The name of the region the car has just entered, shown for a few seconds. */
+    place(name: string) {
+      title.textContent = name;
+      title.classList.remove('show');
+      void title.offsetWidth; // restart the fade
+      title.classList.add('show');
     },
   };
 }
