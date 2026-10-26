@@ -4,14 +4,74 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>puzzlecafe</title>
+    <meta name="description" content="An endless, quiet drive along the coast, in your browser. Day turns to night; stop at a paperboxd café, fill up, keep going." />
     <link rel="icon" href="data:," />
     <style>
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d10; color: #e8e6e3; font-family: system-ui, sans-serif; }
+      :root {
+        --ink: #f3efe6;
+        --dim: rgb(243 239 230 / 0.6);
+        --glass: rgb(12 14 18 / 0.5);
+        --track: rgb(255 255 255 / 0.15);
+        --fuel: #e9c46a;
+        --low: #e76f51;
+        --night: #0b0d10;
+        --gap: 14px;
+        --round: 14px;
+      }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--night); color: var(--ink); font-family: system-ui, sans-serif; }
       canvas { display: block; }
       #debug { position: fixed; top: 8px; left: 8px; margin: 0; padding: 6px 8px; font: 12px/1.4 ui-monospace, monospace; background: rgb(0 0 0 / 0.55); pointer-events: none; }
+      #hud { position: fixed; left: 20px; bottom: 20px; display: flex; gap: var(--gap); align-items: flex-end; font: 500 13px/1.3 system-ui, sans-serif; pointer-events: none; }
+      .panel, #hint, #help { background: var(--glass); backdrop-filter: blur(10px); border-radius: var(--round); padding: 10px 14px; }
+      .speed { font-size: 34px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+      .dim { color: var(--dim); }
+      .row { display: flex; justify-content: space-between; gap: var(--gap); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+      .fuel { width: 120px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+      .fuel > i { display: block; height: 100%; background: var(--fuel); transition: width 0.3s; }
+      .fuel > i.low { background: var(--low); }
+      .clock { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      #hint { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); font: 500 14px/1.3 system-ui, sans-serif; pointer-events: none; }
+      #help { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 4px; font: 13px/1.4 system-ui, sans-serif; pointer-events: none; }
+      #help kbd { display: inline-block; min-width: 34px; margin-right: 8px; color: var(--dim); font: 600 12px/1.4 ui-monospace, monospace; }
+      #map { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+
+      #landing { position: fixed; inset: 0; z-index: 10; display: grid; align-items: end; background: var(--night); }
+      #landing .hero { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #landing::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to top, rgb(8 10 14 / 0.88), rgb(8 10 14 / 0.25) 55%, transparent); }
+      #landing .copy { position: relative; z-index: 1; max-width: 34rem; padding: clamp(24px, 6vw, 72px); }
+      #landing h1 { margin: 0 0 12px; font-size: clamp(40px, 7vw, 72px); font-weight: 700; letter-spacing: -0.03em; }
+      #landing .lede { margin: 0 0 10px; font-size: clamp(18px, 2.4vw, 22px); font-weight: 500; }
+      #landing p { margin: 0 0 22px; line-height: 1.5; color: var(--dim); }
+      #landing button { font: 600 16px system-ui, sans-serif; color: var(--night); background: var(--ink); border: 0; border-radius: 999px; padding: 14px 28px; cursor: pointer; }
+      #landing button:disabled { opacity: 0.7; cursor: progress; }
+      #landing .keys { margin: 18px 0 0; font-size: 13px; }
+      @media not (any-pointer: fine) { #help { display: none !important; } } /* keyboard controls mean nothing on a phone */
+      @media (max-width: 600px) {
+        #hud { left: 12px; right: 12px; bottom: 12px; gap: 8px; }
+        .panel { padding: 8px 10px; }
+        .speed { font-size: 26px; }
+        .fuel { width: 72px; }
+        .clock { font-size: 15px; }
+        #hint { bottom: 84px; max-width: calc(100% - 24px); text-align: center; }
+      }
+      [hidden] { display: none !important; }
     </style>
   </head>
   <body>
-    <script type="module" src="/src/main.ts"></script>
+    <main id="landing">
+      <img class="hero" src="/art/coast.jpg" alt="A coupe on an empty coast road at golden hour, a paperboxd café by the sea" />
+      <div class="copy">
+        <h1>puzzlecafe</h1>
+        <p class="lede">An endless, quiet drive along the coast.</p>
+        <p>
+          Day turns to night as you go. Stop for coffee at a paperboxd café, fill up when the tank runs low, and spot
+          stickynotes and thelocalcode along the way.
+        </p>
+        <button id="start">Start driving</button>
+        <p class="keys">W A S D to drive · Q autodrive · M map · H all controls</p>
+        <p class="keys" id="touch" hidden>Made for a computer with a keyboard. On a phone the car drives itself.</p>
+      </div>
+    </main>
+    <script type="module" src="/src/landing.ts"></script>
   </body>
 </html>

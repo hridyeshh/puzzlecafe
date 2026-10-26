@@ -1,6 +1,6 @@
 // Rapier world, terrain colliders and the car. No three.js here, so node --test can drive the car.
 import RAPIER from '@dimforge/rapier3d-compat';
-import { CHUNK, RES } from './world.ts';
+import { CHUNK, RES } from './world/chunk.ts';
 
 export { RAPIER };
 
@@ -39,8 +39,14 @@ export function addTerrain(world: RAPIER.World, heights: Float32Array, centreX: 
 
 export type Car = ReturnType<typeof createCar>;
 
-export function createCar(world: RAPIER.World, x: number, y: number, z: number) {
-  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setCanSleep(false));
+/** A car at x, y, z heading along yaw (0 faces +z). */
+export function createCar(world: RAPIER.World, x: number, y: number, z: number, yaw = 0) {
+  const body = world.createRigidBody(
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, y, z)
+      .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) })
+      .setCanSleep(false),
+  );
   // A box over the wheels, with the centre of mass pulled low so the car corners without tipping.
   world.createCollider(
     RAPIER.ColliderDesc.cuboid(0.9, 0.3, 2.1)

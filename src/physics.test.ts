@@ -1,19 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RAPIER, addTerrain, createCar, createWorld, type Intent } from './physics.ts';
-import { CHUNK, RES, STEP, colliderHeights, makeHeight, sampleChunk } from './world.ts';
+import { CHUNK, N, RES, STEP, colliderHeights } from './world/chunk.ts';
+import { makeWorld } from './world/world.ts';
 
-test('a chunk collider matches the height function at its grid points', async () => {
+test('a chunk collider matches the chunk heights at its grid points', async () => {
   const world = await createWorld();
-  const height = makeHeight(7);
-  addTerrain(world, colliderHeights(sampleChunk(height, 3, -2)), 3 * CHUNK + CHUNK / 2, -2 * CHUNK + CHUNK / 2);
+  const { heights } = makeWorld(7).chunk(3, -2);
+  addTerrain(world, colliderHeights(heights), 3 * CHUNK + CHUNK / 2, -2 * CHUNK + CHUNK / 2);
   world.step(); // registers the collider with scene queries
   for (const [xi, zi] of [[5, 90], [100, 17], [64, 64], [1, 127]]) {
     const x = 3 * CHUNK + xi * STEP;
     const z = -2 * CHUNK + zi * STEP;
     const hit = world.castRay(new RAPIER.Ray({ x, y: 500, z }, { x: 0, y: -1, z: 0 }), 1000, true);
     assert.ok(hit, `no ground under ${xi},${zi}`);
-    assert.ok(Math.abs(500 - hit.timeOfImpact - height(x, z)) < 1e-3, `wrong height at ${xi},${zi}`);
+    assert.ok(Math.abs(500 - hit.timeOfImpact - heights[(xi + 1) * N + zi + 1]) < 1e-3, `wrong height at ${xi},${zi}`);
   }
 });
 

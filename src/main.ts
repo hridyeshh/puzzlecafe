@@ -1,15 +1,33 @@
 import * as THREE from 'three/webgpu';
-import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
-import { RAPIER, addTerrain, createCar, createWorld, type Intent } from './physics.ts';
-import { CHUNK, N, RES, STEP, colliderHeights, makeHeight, sampleChunk } from './world.ts';
+import { color, pass } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { createAudio } from './audio.ts';
+import { createAutodrive } from './autodrive.ts';
+import { createDaylight, night } from './daylight.ts';
+import { createHud } from './hud.ts';
+import { createMap } from './map.ts';
+import { createOcean } from './ocean.ts';
+import { createCar, createWorld, type Intent } from './physics.ts';
+import { createStreaming } from './streaming.ts';
+import { CHUNK } from './world/chunk.ts';
+import { LANE } from './world/roads.ts';
+import { makeWorld } from './world/world.ts';
 
 const params = new URLSearchParams(location.search);
 const SEED = Number(params.get('seed') ?? 1);
-const RING = 3; // chunks kept loaded in each direction around the car
+// Quality: ?q=low|medium|high. Medium on computers, low on phones and tablets (no mouse or trackpad).
+const touch = !matchMedia('(any-pointer: fine)').matches;
+const PRESETS = {
+  low: { dpr: 1, shadows: 0, far: 6 },
+  medium: { dpr: 1.5, shadows: 2048, far: 9 },
+  high: { dpr: 2, shadows: 4096, far: 9 },
+};
+const quality = PRESETS[params.get('q') as keyof typeof PRESETS] ?? (touch ? PRESETS.low : PRESETS.medium);
 const REBASE = 1024; // m the car may get from the origin before the world shifts back under it
 const DT = 1 / 60; // fixed physics step
 
-const height = makeHeight(SEED);
+// The main thread keeps its own world for heights, autodrive and the map; workers build the tiles.
+const world = makeWorld(SEED);
 // Floating origin: world position of local (0, 0), kept in float64 and a multiple of CHUNK.
 // Meshes and physics live in local coordinates so float32 never sees big numbers.
 const origin = { x: 0, z: 0 };
@@ -23,143 +41,49 @@ try {
   document.body.textContent = 'puzzlecafe needs WebGPU or WebGL 2, and this browser could not start either.';
   throw error;
 }
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, quality.dpr));
 renderer.setSize(innerWidth, innerHeight);
-renderer.toneMapping = THREE.AgXToneMapping;
-renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = quality.shadows > 0 && params.get('shadows') !== '0';
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 5000);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 5000);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// A fixed afternoon sun; time of day arrives in phase 1.
-const sunDir = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(58), THREE.MathUtils.degToRad(215));
-const sky = new SkyMesh();
-sky.scale.setScalar(4000);
-(sky.material as THREE.NodeMaterial).fog = false; // the box sits beyond the fog's far distance
-sky.turbidity.value = 3;
-sky.rayleigh.value = 1.2;
-sky.sunPosition.value.copy(sunDir);
-scene.add(sky);
-scene.fog = new THREE.Fog(0xbfcfdc, 250, 760);
-scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x5b4b36, 1.2));
-const sun = new THREE.DirectionalLight(0xfff0dc, 3);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.normalBias = 0.05;
-Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 1, far: 400 });
-sun.shadow.camera.updateProjectionMatrix();
-scene.add(sun, sun.target);
+// Time of day: starts late afternoon (?t=hours picks), one game hour every two real minutes; T skips an hour.
+let hours = Number(params.get('t') ?? 16.5) % 24;
+const daylight = createDaylight(renderer, scene, { shadowSize: quality.shadows || 512, fogFar: (quality.far + 0.5) * CHUNK });
+const ocean = createOcean();
+scene.add(ocean.mesh);
+// Render through a pipeline so bright things (sun on the water, lights at night) bloom.
+const pipeline = new THREE.RenderPipeline(renderer);
+const hdr = pass(scene, camera).getTextureNode('output');
+const glow = bloom(hdr, 0.3, 0.4, 1);
+pipeline.outputNode = hdr.add(glow);
 
-// ---------- terrain chunks: a mesh and a heightfield collider each
+// ---------- terrain tiles, streamed around the car
 
-const world = await createWorld();
-const M = RES + 1;
-// Every chunk has the same grid, so they share one index buffer.
-const index = new THREE.BufferAttribute(new Uint16Array(RES * RES * 6), 1);
-for (let i = 0, k = 0; i < RES; i++) {
-  for (let j = 0; j < RES; j++, k += 6) {
-    const a = i * M + j;
-    const b = a + M;
-    index.array.set([a, a + 1, b, b, a + 1, b + 1], k);
-  }
+const physics = await createWorld();
+const tiles = createStreaming(scene, physics, origin, SEED, quality.far);
+
+// Start in the right lane of the coast road, or at ?at=x,z,yaw, with the origin moved there.
+const at = params.get('at')?.split(',').map(Number);
+const start = at?.length === 3 && at.every(Number.isFinite) ? { x: at[0], z: at[1], yaw: at[2] } : world.spawn();
+origin.x = Math.floor(start.x / CHUNK) * CHUNK;
+origin.z = Math.floor(start.z / CHUNK) * CHUNK;
+while (!tiles.ready(start.x, start.z)) {
+  tiles.update(start.x, start.z, 50);
+  await new Promise((resolve) => setTimeout(resolve, 16));
 }
-const ground = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
-const GRASS = new THREE.Color(0.17, 0.27, 0.09);
-const DRY = new THREE.Color(0.36, 0.33, 0.16);
-const ROCK = new THREE.Color(0.32, 0.3, 0.27);
-
-interface Chunk { cx: number; cz: number; mesh: THREE.Mesh; collider: RAPIER.Collider }
-const chunks = new Map<string, Chunk>();
-const centre = (cx: number, cz: number) => [cx * CHUNK + CHUNK / 2 - origin.x, cz * CHUNK + CHUNK / 2 - origin.z] as const;
-
-function buildChunk(cx: number, cz: number): Chunk {
-  const s = sampleChunk(height, cx, cz);
-  const pos = new Float32Array(M * M * 3);
-  const nor = new Float32Array(M * M * 3);
-  const col = new Float32Array(M * M * 3);
-  const c = new THREE.Color();
-  for (let i = 0; i < M; i++) {
-    for (let j = 0; j < M; j++) {
-      const v = (i * M + j) * 3;
-      const at = (i + 1) * N + j + 1;
-      const dx = (s[at + N] - s[at - N]) / (2 * STEP);
-      const dz = (s[at + 1] - s[at - 1]) / (2 * STEP);
-      const ny = 1 / Math.hypot(dx, 1, dz);
-      pos[v] = i * STEP - CHUNK / 2;
-      pos[v + 1] = s[at];
-      pos[v + 2] = j * STEP - CHUNK / 2;
-      nor[v] = -dx * ny;
-      nor[v + 1] = ny;
-      nor[v + 2] = -dz * ny;
-      // Grass that dries out uphill, rock on steep ground. Real materials arrive in phase 1.
-      c.lerpColors(GRASS, DRY, THREE.MathUtils.smoothstep(s[at], 10, 60)).lerp(ROCK, THREE.MathUtils.smoothstep(1 - ny, 0.05, 0.16));
-      col[v] = c.r;
-      col[v + 1] = c.g;
-      col[v + 2] = c.b;
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setIndex(index);
-  geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  const mesh = new THREE.Mesh(geometry, ground);
-  mesh.castShadow = mesh.receiveShadow = true;
-  const [x, z] = centre(cx, cz);
-  mesh.position.set(x, 0, z);
-  scene.add(mesh);
-  return { cx, cz, mesh, collider: addTerrain(world, colliderHeights(s), x, z) };
-}
-
-/** Keep the ring of chunks around world (px, pz) loaded. With `smooth`, build at most one chunk per call. */
-function stream(px: number, pz: number, smooth: boolean) {
-  const ccx = Math.floor(px / CHUNK);
-  const ccz = Math.floor(pz / CHUNK);
-  for (const [key, c] of chunks) {
-    if (Math.abs(c.cx - ccx) <= RING + 1 && Math.abs(c.cz - ccz) <= RING + 1) continue;
-    scene.remove(c.mesh);
-    c.mesh.geometry.setIndex(null); // the index is shared; dispose only this chunk's own buffers
-    c.mesh.geometry.dispose();
-    world.removeCollider(c.collider, false);
-    chunks.delete(key);
-  }
-  // ponytail: one chunk per frame on the main thread (~5 ms); phase 1 moves building to workers with LOD
-  let next: [number, number] | null = null;
-  let nearest = Infinity;
-  for (let dx = -RING; dx <= RING; dx++) {
-    for (let dz = -RING; dz <= RING; dz++) {
-      const cx = ccx + dx;
-      const cz = ccz + dz;
-      if (chunks.has(`${cx},${cz}`)) continue;
-      if (!smooth) chunks.set(`${cx},${cz}`, buildChunk(cx, cz));
-      else if (dx * dx + dz * dz < nearest) {
-        nearest = dx * dx + dz * dz;
-        next = [cx, cz];
-      }
-    }
-  }
-  if (next) chunks.set(`${next[0]},${next[1]}`, buildChunk(next[0], next[1]));
-}
-
-// ponytail: spawn on the flattest ground near the origin; phase 1 spawns on a road
-let [spawnX, spawnZ, flattest] = [0, 0, Infinity];
-for (let x = -200; x <= 200; x += 10) {
-  for (let z = -200; z <= 200; z += 10) {
-    const slope = Math.abs(height(x + 2, z) - height(x - 2, z)) + Math.abs(height(x, z + 2) - height(x, z - 2));
-    if (slope < flattest) [spawnX, spawnZ, flattest] = [x, z, slope];
-  }
-}
-stream(spawnX, spawnZ, false); // the whole ring before the car drops in
 
 // ---------- the car: physics body plus a placeholder model
 
-const car = createCar(world, spawnX, height(spawnX, spawnZ) + 1.2, spawnZ);
+const car = createCar(physics, start.x - origin.x, world.heightAt(start.x, start.z) + 1.2, start.z - origin.z, start.yaw);
 const carModel = new THREE.Group();
 const paint = new THREE.MeshStandardMaterial({ color: 0xb8432f, roughness: 0.35, metalness: 0.3 });
 const dark = new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.6 });
@@ -174,17 +98,70 @@ for (const part of [shell, cabin, ...wheels]) {
   carModel.add(part);
 }
 for (const wheel of wheels) wheel.rotation.order = 'YXZ'; // spin about the axle, then steer
+// Lamps glow at night; the headlight beam is one spotlight between them.
+const headLamp = new THREE.MeshStandardNodeMaterial({ color: 0x222222 });
+headLamp.emissiveNode = color(0xfff3dd).mul(night.mul(6).add(0.15));
+const tailLamp = new THREE.MeshStandardNodeMaterial({ color: 0x220806 });
+tailLamp.emissiveNode = color(0xff2a14).mul(night.mul(3).add(0.1));
+for (const side of [-1, 1]) {
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.12, 0.04), headLamp);
+  head.position.set(side * 0.62, 0.12, 2.11);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.1, 0.04), tailLamp);
+  tail.position.set(side * 0.62, 0.15, -2.11);
+  carModel.add(head, tail);
+}
+const headlight = new THREE.SpotLight(0xfff1d6, 0, 90, 0.55, 0.5, 1.3);
+headlight.position.set(0, 0.4, 2.2);
+headlight.target.position.set(0, -0.6, 20);
+carModel.add(headlight, headlight.target);
 scene.add(carModel);
 
-// ---------- input: keyboard and the first gamepad (standard mapping)
+// ---------- fixed-step physics, interpolated for rendering
+
+const prevPos = new THREE.Vector3();
+const currPos = new THREE.Vector3();
+const prevQuat = new THREE.Quaternion();
+const currQuat = new THREE.Quaternion();
+function snapshot() {
+  const t = car.body.translation();
+  const r = car.body.rotation();
+  currPos.set(t.x, t.y, t.z);
+  currQuat.set(r.x, r.y, r.z, r.w);
+}
+snapshot();
+prevPos.copy(currPos);
+prevQuat.copy(currQuat);
+const heading = new THREE.Vector3();
+const carYaw = () => {
+  heading.set(0, 0, 1).applyQuaternion(currQuat);
+  return Math.atan2(heading.x, heading.z);
+};
+
+// ---------- driving: input, autodrive, fuel, HUD, map
 
 let hood = false;
+let auto = touch || params.has('auto'); // Q: the car drives itself until a drive key is pressed; phones start in it
+const TANK = 45_000; // m a full tank lasts at a steady cruise
+let fuel = Math.min(1, Math.max(0, Number(params.get('fuel') ?? 1)));
+let zen = params.has('zen'); // Z: endless fuel
+const hud = createHud();
+const map = createMap(world);
+const autodrive = createAutodrive(world);
+const audio = createAudio();
+const DRIVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
 const keys = new Set<string>();
 addEventListener('keydown', (e) => {
   if (e.repeat) return;
   keys.add(e.code);
+  if (DRIVE_KEYS.includes(e.code)) auto = false;
+  if (e.code === 'KeyQ') auto = !auto;
   if (e.code === 'KeyC') hood = !hood;
   if (e.code === 'KeyR') resetCar();
+  if (e.code === 'KeyT') hours = (hours + 1) % 24;
+  if (e.code === 'KeyZ') zen = !zen;
+  if (e.code === 'KeyM') map.toggle(currPos.x + origin.x, currPos.z + origin.z, carYaw());
+  if (e.code === 'Escape') map.close();
+  if (e.code === 'KeyV') audio.toggle();
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
@@ -204,38 +181,53 @@ function readIntent(): Intent {
   return { steer, throttle, brake };
 }
 
-/** Put the car back on its wheels where it is, keeping its heading. */
-function resetCar() {
-  const p = car.body.translation();
-  const f = new THREE.Vector3(0, 0, 1).applyQuaternion(carModel.quaternion);
-  const yaw = Math.atan2(f.x, f.z);
-  car.body.setTranslation({ x: p.x, y: height(p.x + origin.x, p.z + origin.z) + 1.5, z: p.z }, true);
+/** Is the car beside a pump island of a loaded petrol station? Islands sit at (±2.6, 3) in the station's frame. */
+function atPump(): boolean {
+  const wx = currPos.x + origin.x;
+  const wz = currPos.z + origin.z;
+  for (const s of tiles.stations()) {
+    const cos = Math.cos(s.yaw);
+    const sin = Math.sin(s.yaw);
+    for (const ix of [-2.6, 2.6]) {
+      if (Math.hypot(s.x + ix * cos + 3 * sin - wx, s.z - ix * sin + 3 * cos - wz) < 6.5) return true;
+    }
+  }
+  return false;
+}
+
+/** Set the car down, still, at local (x, y, z) heading `yaw`. */
+function put(x: number, y: number, z: number, yaw: number) {
+  car.body.setTranslation({ x, y, z }, true);
   car.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
   car.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
   car.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
 }
 
-// ---------- fixed-step physics, interpolated for rendering
-
-const prevPos = new THREE.Vector3();
-const currPos = new THREE.Vector3();
-const prevQuat = new THREE.Quaternion();
-const currQuat = new THREE.Quaternion();
-function snapshot() {
-  const t = car.body.translation();
-  const r = car.body.rotation();
-  currPos.set(t.x, t.y, t.z);
-  currQuat.set(r.x, r.y, r.z, r.w);
+/** Put the car back on its wheels where it is, keeping its heading. */
+function resetCar() {
+  const p = car.body.translation();
+  put(p.x, world.heightAt(p.x + origin.x, p.z + origin.z) + 1.5, p.z, carYaw());
 }
-snapshot();
-prevPos.copy(currPos);
-prevQuat.copy(currQuat);
+
+/** A car that ends up in the sea goes back to the right lane of the nearest road. */
+function rescue() {
+  const wx = currPos.x + origin.x;
+  const wz = currPos.z + origin.z;
+  const p = world.area(Math.floor(wx / CHUNK), Math.floor(wz / CHUNK)).index.closest(wx, wz);
+  if (!p) return;
+  put(p.x - p.tz * LANE - origin.x, p.h + 1.2, p.z + p.tx * LANE - origin.z, Math.atan2(p.tx, p.tz));
+  snapshot();
+  prevPos.copy(currPos);
+  prevQuat.copy(currQuat);
+}
+
+// ---------- camera
 
 const forward = new THREE.Vector3();
 const target = new THREE.Vector3();
 const look = currPos.clone();
 const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
-camera.position.set(currPos.x, currPos.y + 3, currPos.z - 8);
+camera.position.set(currPos.x - Math.sin(start.yaw) * 8, currPos.y + 3, currPos.z - Math.cos(start.yaw) * 8);
 
 function updateCamera(dt: number) {
   if (hood) {
@@ -246,7 +238,7 @@ function updateCamera(dt: number) {
   forward.set(0, 0, 1).applyQuaternion(carModel.quaternion).setY(0).normalize();
   target.copy(carModel.position).addScaledVector(forward, -7.5).setY(carModel.position.y + 2.6);
   camera.position.lerp(target, 1 - Math.exp(-6 * dt));
-  const floor = height(camera.position.x + origin.x, camera.position.z + origin.z) + 1;
+  const floor = world.heightAt(camera.position.x + origin.x, camera.position.z + origin.z) + 1;
   if (camera.position.y < floor) camera.position.y = floor;
   target.copy(carModel.position).addScaledVector(forward, 4).setY(carModel.position.y + 1);
   look.lerp(target, 1 - Math.exp(-12 * dt));
@@ -265,16 +257,13 @@ function rebase() {
     v.x -= sx;
     v.z -= sz;
   }
-  for (const c of chunks.values()) {
-    const [x, z] = centre(c.cx, c.cz);
-    c.mesh.position.set(x, 0, z);
-    c.collider.setTranslation({ x, y: 0, z });
-  }
+  tiles.shift(sx, sz);
 }
 
 // ---------- ?debug overlay
 
 const debug = params.has('debug') ? debugOverlay() : null;
+if (debug) Object.assign(globalThis, { puzzlecafe: { scene, origin, world } }); // for poking at from devtools
 function debugOverlay() {
   const el = document.body.appendChild(document.createElement('pre'));
   el.id = 'debug';
@@ -289,8 +278,9 @@ function debugOverlay() {
     const { drawCalls, triangles } = renderer.info.render;
     el.textContent =
       `${backend}  ${Math.round((frames * 1000) / (now - since))} fps  worst ${(worst * 1000).toFixed(1)} ms\n` +
-      `draws ${drawCalls}  tris ${Math.round(triangles / 1000)}k  chunks ${chunks.size}\n` +
-      `${Math.round(car.speed() * 3.6)} km/h  x ${Math.round(carModel.position.x + origin.x)}  z ${Math.round(carModel.position.z + origin.z)}  seed ${SEED}`;
+      `draws ${drawCalls}  tris ${Math.round(triangles / 1000)}k  tiles ${tiles.count}\n` +
+      `${Math.round(car.speed() * 3.6)} km/h  x ${Math.round(carModel.position.x + origin.x)}  z ${Math.round(carModel.position.z + origin.z)}  seed ${SEED}  ` +
+      `${String(Math.floor(hours)).padStart(2, '0')}:${String(Math.floor((hours % 1) * 60)).padStart(2, '0')}${auto ? '  auto' : ''}`;
     frames = 0;
     since = now;
     worst = 0;
@@ -305,17 +295,36 @@ renderer.setAnimationLoop(() => {
   const now = performance.now();
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
-  const intent = readIntent();
+  let intent = readIntent();
+  if (auto) intent = autodrive.drive(currPos.x + origin.x, currPos.z + origin.z, carYaw(), car.speed()) ?? intent;
+  if (!zen && fuel <= 0 && car.speed() > 5.5) intent = { ...intent, throttle: 0 }; // empty: limp at 20 km/h
   acc += dt;
   while (acc >= DT) {
     prevPos.copy(currPos);
     prevQuat.copy(currQuat);
     car.update(intent, DT);
-    world.step();
+    physics.step();
     snapshot();
     acc -= DT;
   }
+  if (currPos.y < -2) rescue();
   if (Math.abs(currPos.x) > REBASE || Math.abs(currPos.z) > REBASE) rebase();
+
+  // Fuel burns with distance (more on the throttle); hold F beside a pump to fill up.
+  const v = car.speed();
+  if (!zen) fuel = Math.max(0, fuel - ((Math.abs(v) * dt) / TANK) * (0.5 + 0.5 * intent.throttle));
+  let message = '';
+  if (Math.abs(v) < 1 && atPump()) {
+    if (held('KeyF') && fuel < 1) fuel = Math.min(1, fuel + 0.25 * dt);
+    message = fuel >= 1 ? 'Tank full' : held('KeyF') ? `Refuelling… ${Math.round(fuel * 100)}%` : 'Hold F to refuel';
+  } else if (!zen && fuel <= 0) message = 'Out of fuel: limping at 20 km/h to the next pump';
+  else if (!zen && fuel < 0.2) message = 'Fuel low: look out for a FUEL sign';
+  else if (auto) message = touch ? 'Autodrive' : 'Autodrive: press any drive key to take over';
+  hud.update(v * 3.6, zen ? null : fuel, hours, message);
+  // Waves are loud on the beach road and gone ~1 km inland.
+  const coast = world.fields.continent(currPos.x + origin.x, currPos.z + origin.z);
+  audio.update(v, intent.throttle, 1 - Math.min(1, Math.max(0, (coast - 0.02) / 0.4)));
+  if (map.open) map.follow(currPos.x + origin.x, currPos.z + origin.z, carYaw());
 
   const alpha = acc / DT;
   carModel.position.lerpVectors(prevPos, currPos, alpha);
@@ -328,11 +337,15 @@ renderer.setAnimationLoop(() => {
     wheels[i].rotation.x = car.vehicle.wheelRotation(i) ?? 0;
   }
   updateCamera(dt);
-  sun.position.copy(carModel.position).addScaledVector(sunDir, 200);
-  sun.target.position.copy(carModel.position);
-  sky.position.copy(camera.position);
-  stream(carModel.position.x + origin.x, carModel.position.z + origin.z, true);
+  hours = (hours + dt / 120) % 24;
+  daylight.update(hours, camera.position, carModel.position);
+  headlight.intensity = night.value * 150;
+  // Bloom is for lights at night; by day it only catches the sun on the water.
+  glow.strength.value = 0.1 + night.value * 0.75;
+  glow.threshold.value = 1.4 - night.value * 0.6;
+  ocean.follow(camera.position.x, camera.position.z, origin);
+  tiles.update(carModel.position.x + origin.x, carModel.position.z + origin.z);
 
-  renderer.render(scene, camera);
+  pipeline.render();
   debug?.(now, dt);
 });
