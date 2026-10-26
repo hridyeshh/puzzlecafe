@@ -1,0 +1,23 @@
+{
+  "name": "puzzlecafe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "oxlint",
+    "test": "node --test src/world.test.ts src/physics.test.ts"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "0.21.0",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.9",
+    "@types/three": "0.186.0",
+    "oxlint": "1.87.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}
