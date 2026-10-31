@@ -33,6 +33,9 @@ function save(key: string, value: unknown) {
   }
 }
 
+/** Map badges by place kind: fill and label. */
+const BADGES = { cafe: ['#111111', 'pb'], bookstore: ['#2f5d46', 'bk'], station: ['#1f8a83', 'F'] } as const;
+
 /**
  * `travel` starts the drive again elsewhere, given as `place=<biome>` (the nearest road in that kind of country: the
  * buttons along the top of the map) or `at=x,z,yaw` (a pin).
@@ -49,6 +52,13 @@ export function createMap(world: World, travel: (where: string) => void) {
     b.textContent = TRAVEL[biome];
     b.title = `Go to the nearest ${TRAVEL[biome].toLowerCase()}`;
     b.addEventListener('click', () => travel(`place=${biome}`));
+  }
+  const city = world.fields.city;
+  if (city) {
+    const b = bar.appendChild(document.createElement('button'));
+    b.textContent = city.name;
+    b.title = `Go to ${city.name}, the city of light`;
+    b.addEventListener('click', () => travel('place=city'));
   }
   const pins = load<Pin[]>('puzzlecafe.pins', []).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.z) && Number.isFinite(p.yaw) && p.ink in INKS);
   let ink = load<Ink>('puzzlecafe.ink', 'yellow');
@@ -154,9 +164,9 @@ export function createMap(world: World, travel: (where: string) => void) {
     g.textBaseline = 'middle';
     for (const p of places) {
       if (ZOOMS[zoom] > 24) break;
-      const cafe = p.kind === 'cafe';
-      const [x, y, fill] = [ox + p.x / m, oy + p.z / m, cafe ? '#111111' : '#1f8a83'];
-      if (ZOOMS[zoom] <= 12) badge(x, y, fill, cafe ? 'pb' : 'F', dpr);
+      const [fill, label] = BADGES[p.kind as keyof typeof BADGES];
+      const [x, y] = [ox + p.x / m, oy + p.z / m];
+      if (ZOOMS[zoom] <= 12) badge(x, y, fill, label, dpr);
       else dot(x, y, fill, dpr);
     }
     // Region names when zoomed out, white with a dark halo.
@@ -169,6 +179,16 @@ export function createMap(world: World, travel: (where: string) => void) {
         g.strokeText(r.name, ox + r.x / m, oy + r.z / m);
         g.fillText(r.name, ox + r.x / m, oy + r.z / m);
       }
+    }
+    // The city's name, at every zoom.
+    if (city) {
+      g.font = `700 ${(ZOOMS[zoom] >= 12 ? 22 : 18) * dpr}px ui-serif, Georgia, serif`;
+      g.lineWidth = 6 * dpr;
+      g.strokeStyle = 'rgba(12, 14, 18, 0.75)';
+      g.fillStyle = '#ffe2a8';
+      const [x, y] = [ox + city.x / m, oy + city.z / m];
+      g.strokeText(city.name, x, y);
+      g.fillText(city.name, x, y);
     }
     for (const p of pins) note(ox + p.x / m, oy + p.z / m, p.ink, dpr);
     drawCar(ox + car.x / m, oy + car.z / m, dpr);
@@ -264,18 +284,20 @@ export function createMap(world: World, travel: (where: string) => void) {
   function legend(h: number, dpr: number) {
     g.fillStyle = 'rgba(12, 14, 18, 0.6)';
     g.beginPath();
-    g.roundRect(8 * dpr, 10 * dpr, 150 * dpr, 96 * dpr, 12 * dpr);
+    g.roundRect(8 * dpr, 10 * dpr, 150 * dpr, 126 * dpr, 12 * dpr);
     g.fill();
     g.textAlign = 'center';
-    badge(24 * dpr, 28 * dpr, '#111111', 'pb', dpr);
-    badge(24 * dpr, 58 * dpr, '#1f8a83', 'F', dpr);
-    note(24 * dpr, 88 * dpr, ink, dpr);
+    badge(24 * dpr, 28 * dpr, ...BADGES.cafe, dpr);
+    badge(24 * dpr, 58 * dpr, ...BADGES.bookstore, dpr);
+    badge(24 * dpr, 88 * dpr, ...BADGES.station, dpr);
+    note(24 * dpr, 118 * dpr, ink, dpr);
     g.textAlign = 'left';
     g.fillStyle = '#ffffff';
     g.font = `600 ${13 * dpr}px system-ui, sans-serif`;
     g.fillText('paperboxd café', 42 * dpr, 28 * dpr);
-    g.fillText('fuel', 42 * dpr, 58 * dpr);
-    g.fillText('your pins', 42 * dpr, 88 * dpr);
+    g.fillText('paperboxd books', 42 * dpr, 58 * dpr);
+    g.fillText('fuel', 42 * dpr, 88 * dpr);
+    g.fillText('your pins', 42 * dpr, 118 * dpr);
     const hint = 'drag to move · scroll to zoom · click a road to pin it · click a pin to go there · right-click to unpin · M to close';
     g.font = `${12 * dpr}px system-ui, sans-serif`;
     g.fillStyle = 'rgba(12, 14, 18, 0.6)';

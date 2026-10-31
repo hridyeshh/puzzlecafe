@@ -1,6 +1,8 @@
 // Hoardings, paperboxd cafés and petrol stations: built once from primitives, cloned at each POI.
 import * as THREE from 'three/webgpu';
-import { color, texture } from 'three/tsl';
+import { color, texture, vec3 } from 'three/tsl';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { posterFor } from './brands.ts';
 import { night } from './daylight.ts';
@@ -40,7 +42,7 @@ function part(geometry: THREE.BufferGeometry, material: THREE.Material, x: numbe
   return m;
 }
 
-function canvasTexture(width: number, height: number, draw: (g: CanvasRenderingContext2D) => void) {
+export function canvasTexture(width: number, height: number, draw: (g: CanvasRenderingContext2D) => void) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -102,15 +104,15 @@ function shelves() {
   });
 }
 
-// "paperboxd café" and the logo in dark letters on the pale fascia, as in the concept art.
-function cafeLetters(fascia: string) {
+// "paperboxd café" and the logo in dark letters on the pale fascia, as in the concept art; the letters glow at night.
+function cafeSign(fascia: string, name = 'paperboxd café') {
   const t = canvasTexture(1024, 128, (g) => {
     g.fillStyle = fascia;
     g.fillRect(0, 0, 1024, 128);
     g.fillStyle = '#1d1c1a';
     g.font = '600 74px "Helvetica Neue", Helvetica, Arial, sans-serif';
     g.textBaseline = 'middle';
-    g.fillText('paperboxd café', 160, 66);
+    g.fillText(name, 160, 66);
   });
   const logo = new Image();
   logo.onload = () => {
@@ -120,7 +122,10 @@ function cafeLetters(fascia: string) {
     t.needsUpdate = true;
   };
   logo.src = '/brands/paperboxd-logo.png';
-  return t;
+  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.85 });
+  m.colorNode = texture(t);
+  m.emissiveNode = texture(t).rgb.sub(vec3(...new THREE.Color(fascia).toArray())).length().mul(night.mul(2.2)).mul(color(0xffc27a)); // the letters glow, not the board
+  return m;
 }
 
 /** Parts gathered per material and merged into one mesh each, so a prop of a hundred parts is a few draw calls. */
@@ -201,7 +206,7 @@ const STYLES: Record<string, CafeStyle> = {
  * pendant lamps, the name across the fascia, and a raised terrace (tables, parasols, planters, string lights) facing
  * the road (+z). The fascia letters glow at night.
  */
-function cafe(style: CafeStyle): Prop {
+function cafe(style: CafeStyle, name?: string): Prop {
   const k = kit();
   // Shell: walls, fascia, pillars, roof, plinth.
   k.add(style.walls, box(14, 4.4, 0.3), 0, 2.2, -4.35);
@@ -279,11 +284,7 @@ function cafe(style: CafeStyle): Prop {
 
   const g = k.into(new THREE.Group());
   const books = part(new THREE.PlaneGeometry(13.4, 2.8), glowing(shelves(), 0.12, 1.4), 0, 1.75, -4.18);
-  const letters = cafeLetters(style.fascia);
-  const signMaterial = new THREE.MeshStandardNodeMaterial({ roughness: 0.85 });
-  signMaterial.colorNode = texture(letters);
-  signMaterial.emissiveNode = texture(letters).r.oneMinus().mul(night.mul(2.2)).mul(color(0xffc27a)); // dark letters glow
-  const sign = part(new THREE.PlaneGeometry(8.4, 1.05), signMaterial, 0, 3.75, 4.52);
+  const sign = part(new THREE.PlaneGeometry(8.4, 1.05), cafeSign(style.fascia, name), 0, 3.75, 4.52);
   books.castShadow = sign.castShadow = false;
   g.add(books, sign);
   return {
@@ -295,6 +296,208 @@ function cafe(style: CafeStyle): Prop {
       { x: 4.35, y: 0.72, z: 9.85, hx: 2.65, hy: 0.3, hz: 0.25 },
     ],
   };
+}
+
+// ---------- generated models (image-to-3D from a studio shot; masters and the processing script in art-src/)
+
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+
+/** A generated model's mesh in its file's frame and units, its attributes as plain floats (gltfpack quantizes them). */
+export async function loadModel(url: string) {
+  const source = (await loader.loadAsync(url)).scene.getObjectByProperty('isMesh', true) as THREE.Mesh;
+  source.updateWorldMatrix(true, false);
+  const geometry = source.geometry;
+  for (const [key, a] of Object.entries(geometry.attributes)) {
+    const f = new Float32Array(a.count * a.itemSize);
+    for (let i = 0; i < a.count; i++) for (let c = 0; c < a.itemSize; c++) f[i * a.itemSize + c] = a.getComponent(i, c);
+    geometry.setAttribute(key, new THREE.BufferAttribute(f, a.itemSize));
+  }
+  geometry.applyMatrix4(source.matrixWorld);
+  geometry.computeBoundingBox();
+  return { geometry, material: source.material as THREE.MeshStandardMaterial };
+}
+
+/** The model's triangles sorted by `which` (from its centre and its normal's y): an index into the parts, or -1 to drop it.
+ * The parts share the model's attributes, so a transform of the model afterwards moves them all. */
+function split(geometry: THREE.BufferGeometry, count: number, which: (x: number, y: number, z: number, ny: number) => number) {
+  const pos = geometry.getAttribute('position');
+  const index = geometry.getIndex()!;
+  const lists: number[][] = Array.from({ length: count }, () => []);
+  const [a, b, c, ab, ac] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  for (let t = 0; t < index.count; t += 3) {
+    const [i, j, l] = [index.getX(t), index.getX(t + 1), index.getX(t + 2)];
+    a.fromBufferAttribute(pos, i);
+    b.fromBufferAttribute(pos, j);
+    c.fromBufferAttribute(pos, l);
+    const ny = ab.subVectors(b, a).cross(ac.subVectors(c, a)).normalize().y;
+    const w = which((a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3, ny);
+    if (w >= 0) lists[w].push(i, j, l);
+  }
+  return lists.map((list) => {
+    const g = new THREE.BufferGeometry();
+    for (const [key, attribute] of Object.entries(geometry.attributes)) g.setAttribute(key, attribute);
+    g.setIndex(list);
+    return g;
+  });
+}
+
+/** Model units to metres in a prop's frame: scale k, the model's point (mx, my, mz) to the prop's (px, py, pz). */
+function frame(k: number, mx: number, my: number, mz: number, px: number, py: number, pz: number) {
+  const X = (x: number) => (x - mx) * k + px;
+  const Y = (y: number) => (y - my) * k + py;
+  const Z = (z: number) => (z - mz) * k + pz;
+  const matrix = new THREE.Matrix4().makeTranslation(X(0), Y(0), Z(0)).multiply(new THREE.Matrix4().makeScale(k, k, k));
+  const block = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): Box => {
+    const [a, b, c, d, e, f] = [X(x0), X(x1), Y(y0), Y(y1), Z(z0), Z(z1)];
+    return { x: (a + b) / 2, y: (c + d) / 2, z: (e + f) / 2, hx: Math.abs(b - a) / 2, hy: Math.abs(d - c) / 2, hz: Math.abs(f - e) / 2 };
+  };
+  return { X, Y, Z, matrix, block };
+}
+
+/** A lit copy of a model's material: it glows from within at night (windows, the lamps under a canopy). */
+function litFrom(m: THREE.MeshStandardMaterial, day: number, boost: number) {
+  const lit = new THREE.MeshStandardNodeMaterial({ map: m.map, roughness: 0.85 });
+  lit.emissiveNode = texture(m.map!).mul(night.mul(boost).add(day));
+  return lit;
+}
+
+function meshes(parts: THREE.BufferGeometry[], materials: THREE.Material[], g: THREE.Group) {
+  parts.forEach((geometry, i) => {
+    const mesh = new THREE.Mesh(geometry, materials[i]);
+    mesh.castShadow = mesh.receiveShadow = true;
+    g.add(mesh);
+  });
+}
+
+/**
+ * Cafés, measured once in each file's frame (front +z, up +y, model units): metres per unit (tables 0.75 m high), the
+ * building [x0, x1, z0, z1] and its roof, the terrace deck's top, the glass (its plane, height, and the two panes
+ * either side of the open middle bay) and the fascia's middle [x, y, z]. The panes come out black, so a room of books
+ * goes behind each one. Each is centred across, on the pad, its front where the procedural café's ends.
+ */
+const MODELS: Record<string, { scale: number; shell: number[]; roof: number; deck: number; glass: { z: number; y: number[]; panes: number[][] }; fascia: number[] }> = {
+  coast: { scale: 15, shell: [-0.281, 0.395, -0.501, 0.212], roof: 0.17, deck: -0.123, glass: { z: 0.195, y: [-0.118, 0.099], panes: [[-0.228, -0.098], [0.208, 0.342]] }, fascia: [0.057, 0.128, 0.218] },
+  // The farmhouse: brick, a terracotta roof, three glass bays (all of them panes) under a white beam, a timber deck.
+  country: { scale: 12, shell: [-0.37, 0.39, -0.46, 0.19], roof: 0.07, deck: -0.184, glass: { z: 0.165, y: [-0.17, 0.005], panes: [[-0.29, -0.14], [-0.1, 0.105], [0.15, 0.3]] }, fascia: [0.005, 0.037, 0.192] },
+};
+const ROOM = 2.4; // m: how deep the rooms behind the panes are
+
+async function modelCafe(style: string): Promise<Prop> {
+  const spec = MODELS[style];
+  const { geometry, material } = await loadModel(`/cafes/${style}.glb`);
+  const { min, max } = geometry.boundingBox!.clone(); // model units: applyMatrix4 below remeasures the box in metres, in place
+  const k = spec.scale;
+  const { X, Y, Z, matrix, block } = frame(k, (min.x + max.x) / 2, min.y, max.z, 0, -0.05, 11);
+
+  // Inside a room behind a pane: dropped, the pane with it. In the open bay's room: it glows at night.
+  const { z: gz, y: [y0, y1], panes } = spec.glass;
+  const rooms = panes.map(([p0, p1]) => [p0 - 0.1 / k, p1 + 0.1 / k]);
+  const parts = split(geometry, 2, (x, y, z) => {
+    const bay = y > y0 && y < y1 && z < gz + 0.013;
+    if (bay && z > gz - ROOM / k && rooms.some(([r0, r1]) => x > r0 && x < r1)) return -1;
+    return bay && z < gz - 0.005 && x > panes[0][1] && x < panes[1][0] ? 1 : 0;
+  });
+  geometry.applyMatrix4(matrix);
+  const g = new THREE.Group();
+  meshes(parts, [material, litFrom(material, 0.06, 1.2)], g);
+
+  // Behind each pane, as in the procedural café: books on the back wall, a floor, a ceiling, pendant lamps; glass across.
+  const k2 = kit();
+  const books = glowing(shelves(), 0.12, 1.4);
+  const [bottom, top, front] = [Y(y0), Y(y1), Z(gz)];
+  const h = top - bottom;
+  for (const [r0, r1] of rooms) {
+    const [a, b] = [X(r0), X(r1)];
+    const [w, mid, back] = [b - a, (a + b) / 2, front - ROOM];
+    const wall = new THREE.PlaneGeometry(w, h);
+    const uv = wall.getAttribute('uv');
+    for (let i = 0; i < uv.count; i++) uv.setX(i, (uv.getX(i) * w) / 13.4); // books as wide as on the 13.4 m procedural wall
+    k2.add(books, wall, mid, bottom + h / 2, back);
+    k2.add(wood, new THREE.PlaneGeometry(w, ROOM).rotateX(-Math.PI / 2), mid, bottom + 0.02, front - ROOM / 2);
+    k2.add(inside, new THREE.PlaneGeometry(w, ROOM).rotateX(Math.PI / 2), mid, top, front - ROOM / 2);
+    for (const [x, turn] of [[a, 1], [b, -1]]) k2.add(inside, new THREE.PlaneGeometry(ROOM, h), x, bottom + h / 2, front - ROOM / 2, (turn * Math.PI) / 2);
+    for (let x = a + 0.8; x < b - 0.4; x += 1.4) {
+      for (const z of [back + 0.7, back + 1.6]) {
+        k2.add(lamp, new THREE.SphereGeometry(0.16, 12, 8), x, top - 0.7, z);
+        k2.add(charcoal, new THREE.CylinderGeometry(0.01, 0.01, 0.55, 4), x, top - 0.33, z);
+      }
+    }
+  }
+  const [left, right] = [X(panes[0][0]), X(panes[1][1])];
+  k2.add(glass, new THREE.PlaneGeometry(right - left, h), (left + right) / 2, bottom + h / 2, front + 0.08);
+  k2.into(g);
+  const [fx, fy, fz] = spec.fascia;
+  const sign = part(new THREE.PlaneGeometry(5.4, 0.675), cafeSign(STYLES[style].fascia), X(fx), Y(fy), Z(fz));
+  sign.castShadow = false;
+  g.add(sign);
+
+  // Colliders: the building, and the terrace up to its deck.
+  const [sx0, sx1, sz0, sz1] = spec.shell;
+  return { object: g, boxes: [block(sx0, sx1, min.y, spec.roof, sz0, sz1), block(min.x, max.x, min.y, spec.deck, sz1, max.z)] };
+}
+
+/**
+ * The station, measured once (model units): metres per unit (the canopy's underside 5 m up), the forecourt's top, the
+ * pump islands (x of each, z of their middle, their top), the canopy's underside, its four columns [x, z], and the
+ * shop [x0, x1, z0, z1, roof]; it faces +z, its shop's glass shows lit shelves. The pump (one dispenser on its own kerb,
+ * screens and hoses on both ±x faces): metres per unit (cabinet 1.8 m) and its kerb's bottom.
+ */
+const STATION = { scale: 20, ground: -0.151, islands: [-0.282, 0.18], islandZ: 0.22, islandTop: -0.133, canopy: 0.11, columns: [[-0.285, 0.06], [-0.285, 0.375], [0.18, 0.105], [0.18, 0.3]], shop: [-0.12, 0.39, -0.485, -0.17, 0.025] };
+const PUMP = { scale: 1.94, base: -0.5 };
+/** m: the pump islands' x either side of the station's middle, at z 3 (atPump in main.ts reads it). */
+export let ISLAND_X = 2.6;
+
+async function modelStation(): Promise<Prop> {
+  const [s, p] = await Promise.all([loadModel('/props/station.glb'), loadModel('/props/pump.glb')]);
+  s.material.metalnessMap = null; // its map makes the forecourt metal, a mirror of the dim horizon
+  s.material.metalness = 0;
+  const k = STATION.scale;
+  // The islands either side of x 0, their middle at z 3 as in the procedural station; the forecourt 8 cm above the pad.
+  const { X, Y, matrix, block } = frame(k, (STATION.islands[0] + STATION.islands[1]) / 2, STATION.ground, STATION.islandZ, 0, 0.08, 3);
+  // The canopy's underside and the shop's inside glow at night.
+  const [x0, x1, z0, z1, roof] = STATION.shop;
+  const parts = split(s.geometry, 2, (x, y, z, ny) => ((ny < -0.9 && y > STATION.canopy - 0.01 && z > 0) || (x > x0 + 0.02 && x < x1 - 0.02 && z > z0 + 0.02 && z < z1 - 0.02 && y < roof - 0.01) ? 1 : 0));
+  s.geometry.applyMatrix4(matrix);
+  const g = new THREE.Group();
+  meshes(parts, [s.material, litFrom(s.material, 0.05, 0.45)], g);
+  const boxes = [...STATION.columns.map(([x, z]) => block(x - 0.008, x + 0.008, STATION.ground, STATION.canopy, z - 0.008, z + 0.008)), block(x0, x1, STATION.ground, roof, z0, z1)];
+
+  // Two pumps on each island.
+  const kp = PUMP.scale;
+  p.geometry.applyMatrix4(new THREE.Matrix4().makeTranslation(0, -PUMP.base * kp, 0).multiply(new THREE.Matrix4().makeScale(kp, kp, kp)));
+  ISLAND_X = X(STATION.islands[1]);
+  for (const x of [-ISLAND_X, ISLAND_X]) {
+    for (const z of [1.6, 4.4]) {
+      const pump = part(p.geometry, p.material, x, Y(STATION.islandTop), z);
+      g.add(pump);
+      boxes.push({ x, y: 1.1, z, hx: 0.3, hy: 0.9, hz: 0.6 });
+    }
+  }
+  const k2 = kit();
+  const fuel = totem(k2, boxes);
+  k2.into(g);
+  g.add(fuel);
+  return { object: g, boxes };
+}
+
+/** Swap in the generated models, where they load; the rest stay procedural. Call before any prop is made. */
+export async function loadModels() {
+  const made = await Promise.all([
+    ...Object.keys(MODELS).map(async (style) => [`cafe-${style}`, await modelCafe(style).catch(() => null)] as const),
+    (async () => ['station', await modelStation().catch(() => null)] as const)(),
+  ]);
+  for (const [key, p] of made) if (p) prefabs.set(key, p);
+}
+
+/** The totem at the forecourt's front corner: FUEL up top, price rows under it. Returns the FUEL face, to add after the kit. */
+function totem(k: ReturnType<typeof kit>, boxes: Box[]) {
+  k.add(steel, box(0.5, 7, 0.5), 11.5, 3.5, 9.5);
+  k.add(teal, box(2.6, 3, 0.5), 11.5, 7.9, 9.5);
+  for (const y of [7.15, 7.65]) k.add(plaster, box(2, 0.32, 0.06), 11.5, y, 9.76);
+  boxes.push({ x: 11.5, y: 3.5, z: 9.5, hx: 0.25, hy: 3.5, hz: 0.25 });
+  const fuel = part(new THREE.PlaneGeometry(2.3, 1.15), glowing(words('FUEL', '#1f8a83', '#ffffff'), 0.35, 1.2), 11.5, 8.6, 9.76);
+  fuel.castShadow = false;
+  return fuel;
 }
 
 /**
@@ -334,11 +537,7 @@ function station(): Prop {
   k.add(plaster, box(12, 3.8, 7), 0, 1.9, -7.5);
   k.add(teal, box(12.6, 0.3, 7.6), 0, 3.95, -7.5);
   boxes.push({ x: 0, y: 1.9, z: -7.5, hx: 6, hy: 1.9, hz: 3.5 });
-  // The totem: FUEL up top, price rows under it.
-  k.add(steel, box(0.5, 7, 0.5), 11.5, 3.5, 9.5);
-  k.add(teal, box(2.6, 3, 0.5), 11.5, 7.9, 9.5);
-  for (const y of [7.15, 7.65]) k.add(plaster, box(2, 0.32, 0.06), 11.5, y, 9.76);
-  boxes.push({ x: 11.5, y: 3.5, z: 9.5, hx: 0.25, hy: 3.5, hz: 0.25 });
+  const fuel = totem(k, boxes);
   for (const x of [-13.4, 13.4]) {
     k.add(concrete, box(2, 0.7, 2), x, 0.35, -10);
     for (const dx of [-0.5, 0.4]) k.add(leaves, new THREE.IcosahedronGeometry(0.55, 1), x + dx, 0.95, -10);
@@ -347,8 +546,7 @@ function station(): Prop {
   const g = k.into(new THREE.Group());
   const books = part(new THREE.PlaneGeometry(9, 2.4), glowing(shelves(), 0.12, 1.2), 0, 1.5, -3.99);
   const open = part(new THREE.PlaneGeometry(2.4, 0.6), glowing(words('open', '#d8e2e6', '#1f8a83'), 0.2, 1), -4.6, 3.2, -3.98);
-  const fuel = part(new THREE.PlaneGeometry(2.3, 1.15), glowing(words('FUEL', '#1f8a83', '#ffffff'), 0.35, 1.2), 11.5, 8.6, 9.76);
-  books.castShadow = open.castShadow = fuel.castShadow = false;
+  books.castShadow = open.castShadow = false;
   g.add(books, open, fuel);
   return { object: g, boxes };
 }
@@ -455,6 +653,15 @@ const faces: (() => THREE.Texture)[] = [
 
 function signPrefab(kind: number): Prop {
   const g = new THREE.Group();
+  if (kind === 5) {
+    // A street lamp (SIGN_LAMP): a 7 m pole, an arm out over the road, its lens lit from below at night.
+    const metal = [new THREE.CylinderGeometry(0.05, 0.08, 7, 8).translate(0, 3.5, 0), box(0.06, 0.06, 1.7).translate(0, 6.95, 0.8), box(0.24, 0.1, 0.55).translate(0, 6.92, 1.65)];
+    g.add(part(mergeGeometries(metal), steel, 0, 0, 0)); // one draw for the steel
+    const lens = part(new THREE.PlaneGeometry(0.18, 0.44).rotateX(Math.PI / 2), lamp, 0, 6.86, 1.65);
+    lens.castShadow = false;
+    g.add(lens);
+    return { object: g, boxes: [{ x: 0, y: 3.5, z: 0, hx: 0.08, hy: 3.5, hz: 0.08 }] };
+  }
   const wide = kind <= 1;
   const [w, h, y] = wide ? [1.6, 0.8, 2.1] : [0.8, 0.8, kind === 4 ? 2.1 : 1.5];
   g.add(part(new THREE.CylinderGeometry(0.05, 0.05, y + h / 2, 8), steel, 0, (y + h / 2) / 2, -0.06));
@@ -489,6 +696,7 @@ export function makeProp(poi: Poi & { variant?: string }): Prop {
     return { object, boxes: base.boxes };
   }
   const style = poi.variant && poi.variant in STYLES ? poi.variant : 'coast';
-  const base = poi.kind === 'cafe' ? prefab(`cafe-${style}`, () => cafe(STYLES[style])) : prefab('station', station);
+  // ponytail: a bookstore is the farmhouse café with its own name until its model is made (art-src/props/bookstore.jpg)
+  const base = poi.kind === 'cafe' ? prefab(`cafe-${style}`, () => cafe(STYLES[style])) : poi.kind === 'bookstore' ? prefab('bookstore', () => cafe(STYLES.country, 'paperboxd books')) : prefab('station', station);
   return { object: base.object.clone(), boxes: base.boxes };
 }

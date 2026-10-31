@@ -5,13 +5,13 @@ import {
   cameraPosition,
   color,
   densityFogFactor,
-  dot,
   float,
   fog,
   luminance,
   max,
   mix,
   mx_fractal_noise_float,
+  mx_noise_float,
   pmremTexture,
   positionLocal,
   positionWorld,
@@ -29,11 +29,16 @@ import { mulberry32 } from './world/hash.ts';
 
 /** 0 by day, 1 at night. Windows, posters and headlights glow with it. */
 export const night = uniform(0);
+/** 0–1: how deep into a city's smog the camera is; it thickens the haze and turns it violet. */
+export const smog = uniform(0);
 
 const NOON = new THREE.Color(0xfff4e6);
 const WARM = new THREE.Color(0xffa860);
 const MOON = new THREE.Color(0x9fb6ff);
 const DOME = 0x16294a; // the night dome's colour at the horizon
+// The day sky as seen in C3, (146, 186, 224) at the horizon to (64, 132, 226) overhead, as scene colours at exposure 1.
+const SKY = [[0.156, 0.4012, 1.1299], [0.0497, 0.3673, 1.8824], [0.0042, 0.2905, 1.8564], [0.0318, 0.1831, 0.9829]];
+const SEA_TINT = [0.42, 0.72, 1.25]; // what the sea's reflection of the environment is multiplied by at midday
 const ss = THREE.MathUtils.smoothstep;
 
 /** `shadowSize`: shadow map resolution; `fogFar`: where the fog is total, about the far edge of the tiles. */
@@ -41,11 +46,14 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
   // The visible sky, and a twin rendered into the environment map that water and paint reflect and fog takes after.
   const skies = [new SkyMesh(), new SkyMesh()];
   // This sky gets far brighter than the land as the sun climbs, so exposure that suits the land whites it out;
-  // its own gain comes down instead, keeping a deep blue at noon.
-  // Its horizon also stays whitish at noon, so by day its hue is repainted (its brightness kept) from a gradient like the
-  // concept art's: pale blue low, deep blue high. The repaint fades out toward sunset, which it does well on its own.
+  // its own gain comes down instead. By day the visible sky is painted outright with the concept art's (C3) colours,
+  // from the haze at the horizon to the deep blue overhead, given as the scene colours that tone mapping and the grade
+  // turn into exactly those (SKY: the chain inverted at exposure 1, so divided by the exposure). The sun's disc stays.
+  // The paint fades out toward sunset, which the model does well on its own. The environment's twin keeps the model's
+  // sky, or the land and road, lit by it, would turn blue.
   const skyGain = uniform(1);
   const blueness = uniform(0);
+  const exposure = uniform(1); // the renderer's tone mapping exposure
   for (const [i, s] of skies.entries()) {
     s.scale.setScalar(4000);
     s.turbidity.value = 2; // clear Mediterranean air
@@ -53,14 +61,14 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
     s.mieCoefficient.value = 0.003;
     const m = s.material as THREE.NodeMaterial;
     m.fog = false; // the box sits beyond the fog's far distance
-    const base = (m.colorNode as THREE.Node<'vec4'>).rgb;
-    const grad = mix(color(0xb4cfe8), color(0x2a63b0), smoothstep(0, 0.55, positionLocal.normalize().y.max(0)).pow(0.8));
-    const painted = grad.div(luminance(grad)).mul(luminance(base));
-    // Only the visible sky is repainted, and dimmed further by day so tone mapping keeps its blue: lit by the deep blue,
-    // the land and road would turn blue.
-    const lit = i === 0 ? mix(base, painted, blueness).mul(blueness.mul(-0.75).add(1)) : base;
+    const base = (m.colorNode as THREE.Node<'vec4'>).rgb.mul(skyGain);
+    const dir = positionLocal.normalize();
+    const [h, mid, top, zenith] = SKY.map((c) => vec3(...c));
+    const paint = mix(mix(mix(h, mid, smoothstep(0.03, 0.25, dir.y)), top, smoothstep(0.25, 0.5, dir.y)), zenith, smoothstep(0.5, 0.95, dir.y)).div(exposure);
+    const disc = smoothstep(0.999, 0.99995, dir.dot(s.sunPosition.normalize()));
+    const lit = i === 0 ? mix(base, paint, blueness).add(base.mul(blueness).mul(disc)) : base;
     // Under a full cover of cloud the sky is a soft grey.
-    m.colorNode = vec4(mix(lit, vec3(luminance(lit)).mul(vec3(0.9, 0.94, 1)), cover.mul(0.85)).mul(skyGain), 1);
+    m.colorNode = vec4(mix(lit, vec3(luminance(lit)).mul(vec3(0.9, 0.94, 1)), smoothstep(0.15, 1, cover).mul(0.85)), 1);
   }
   const [sky, envSky] = skies;
   const envScene = new THREE.Scene().add(envSky);
@@ -83,7 +91,7 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
     const toward = vec2(dir.x, dir.z).normalize().dot(vec2(sun.x, sun.z).normalize()).max(0);
     const deep = mix(color(DOME), color(0x03070f), up);
     const violet = mix(color(0x5f6aa6), color(0x1c2a5e), up).add(color(0xff7a3a).mul(toward.pow(4)).mul(up.oneMinus().pow(4)));
-    domeMaterial.colorNode = mix(deep, violet, twilight);
+    domeMaterial.colorNode = mix(deep, violet, twilight).add(color(0x2a1648).mul(smog.mul(0.7))); // a city's smog glows violet
   }
   domeMaterial.opacityNode = night.mul(0.95);
   const dome = new THREE.Mesh(new THREE.SphereGeometry(3500, 32, 16), domeMaterial);
@@ -101,21 +109,29 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
   starMaterial.opacityNode = night;
   const stars = new THREE.Points(starGeometry, starMaterial);
 
-  // Clouds: fractal noise on a plane overhead, seen through a dome; drifting, thinning to the horizon, lit by the sun
-  // (warm when it is low) and shaded with the colour of the sky around them.
+  // Clouds: fair-weather cumulus, as in the concept art. Fractal noise on a plane overhead, seen through a dome, so far
+  // clouds crowd into banks toward the horizon; drifting. Heaps with cauliflower edges (a finer noise eats into them),
+  // grey where they are thick and the sun does not reach through, bright on the side toward the sun (where the heap
+  // thins that way), warm when the sun is low, and shaded with the colour of the sky around them.
   const cloudMaterial = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, transparent: true, depthWrite: false, fog: false });
   {
     const dir = positionLocal.normalize();
-    const plane = dir.xz.div(dir.y.max(0.04)).mul(0.6).add(vec2(time.mul(0.004), time.mul(0.0015)));
-    const n = mx_fractal_noise_float(vec3(plane, time.mul(0.002)), 4, 2, 0.5);
-    // Fair-weather clouds with blue sky between, thinning out low down where they would crowd into a haze.
-    const density = smoothstep(float(0.3).sub(cover.mul(0.55)), float(0.6).sub(cover.mul(0.35)), n).mul(smoothstep(0.06, 0.32, dir.y)); // thicker as the weather turns
+    const plane = dir.xz.div(dir.y.max(0.015)).mul(0.24).add(vec2(time.mul(0.003), time.mul(0.001)));
+    const heap = mx_fractal_noise_float(vec3(plane, time.mul(0.0015)), 4, 2, 0.5);
+    const puff = heap.add(mx_noise_float(vec3(plane.mul(5), time.mul(0.004))).mul(0.07));
+    const edge = float(0.24).sub(cover.mul(0.5)); // thicker as the weather turns
+    const density = smoothstep(edge, edge.add(0.16), puff).mul(smoothstep(0, 0.05, dir.y));
+    const core = smoothstep(edge.add(0.16), edge.add(0.55), puff);
+    const toward = vec2(sun.x, sun.z).normalize().mul(0.07);
+    const facing = smoothstep(-0.05, 0.12, heap.sub(mx_fractal_noise_float(vec3(plane.add(toward), time.mul(0.0015)), 2, 2, 0.5)));
     const around = pmremTexture(env.texture, dir, float(0.7));
-    const lit = dot(dir, sun).max(0).pow(4).mul(0.9).add(0.35).mul(cover.mul(-0.6).add(1)); // grey under a full cover
-    cloudMaterial.colorNode = around.mul(0.75).add(sunTint.mul(lit).mul(density.oneMinus().mul(0.5).add(0.5)));
-    cloudMaterial.opacityNode = density.mul(0.92);
+    const bright = sunTint.mul(facing.mul(0.45).add(0.75)).add(around.mul(0.35));
+    const shade = around.mul(0.8).add(sunTint.mul(0.22));
+    cloudMaterial.colorNode = mix(bright, shade, core.mul(0.7)).mul(cover.mul(-0.5).add(1)); // grey under a full cover
+    cloudMaterial.opacityNode = density.mul(0.95);
   }
-  const clouds = new THREE.Mesh(new THREE.SphereGeometry(3000, 48, 24), cloudMaterial);
+  // The upper half only: there are no clouds below the horizon, and the (transparent) sea would not hide their shading.
+  const clouds = new THREE.Mesh(new THREE.SphereGeometry(3000, 48, 12, 0, Math.PI * 2, 0, Math.PI / 2), cloudMaterial);
   dome.renderOrder = stars.renderOrder = clouds.renderOrder = -1; // first among the transparent things, behind the sea
 
   // Fog is the sky just above the horizon behind whatever it covers, so far hills fade into the sky; a haze that
@@ -126,8 +142,8 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
     const behind = vec3(view.x, view.y.max(0.03), view.z).normalize();
     // Blurred and capped, so the sun's own glow cannot white out what lies toward it.
     const sky = pmremTexture(env.texture, behind, float(0.5)).min(vec3(1.4));
-    const tint = mix(sky, mix(color(DOME), color(0x6a5f96), twilight), night.mul(0.95));
-    scene.fogNode = fog(tint, max(densityFogFactor(haze), rangeFogFactor(opts.fogFar * 0.8, opts.fogFar)));
+    const tint = mix(mix(sky, mix(color(DOME), color(0x6a5f96), twilight), night.mul(0.95)), mix(color(0x8a7a9a), color(0x3a2c55), night), smog.mul(0.55));
+    scene.fogNode = fog(tint, max(densityFogFactor(haze.add(smog.mul(0.0008))), rangeFogFactor(opts.fogFar * 0.8, opts.fogFar)));
   }
 
   const hemi = new THREE.HemisphereLight(0xcfe3ff, 0x5b4b36, 0.25);
@@ -142,6 +158,11 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
   let baked = -10; // sun height at the last environment bake
   let pace = 1;
   return {
+    /**
+     * The environment for the sea to reflect: by day tinted toward the painted sky, whose deep blue the environment
+     * itself leaves out (it lights the land too); untinted toward sunset, so the golden light still glitters on it.
+     */
+    seaEnvironment: pmremTexture(env.texture).mul(mix(vec3(1), vec3(...SEA_TINT), blueness)),
     /** How fast the clock should run now: slower around sunrise and sunset, so golden and blue hour last. */
     get pace() {
       return pace;
@@ -156,7 +177,7 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
       night.value = 1 - ss(sunDir.y, -0.16, 0.02);
       twilight.value = ss(sunDir.y, -0.3, -0.08) * (1 - ss(sunDir.y, -0.02, 0.06));
       skyGain.value = (1 - 0.55 * ss(sunDir.y, 0.25, 0.85)) * (1 - 0.35 * cover.value);
-      blueness.value = 0.85 * ss(sunDir.y, 0.12, 0.45) * (1 - cover.value);
+      blueness.value = ss(sunDir.y, 0.12, 0.45) * (1 - ss(cover.value, 0.15, 1));
       pace = 0.45 + 0.55 * ss(Math.abs(sunDir.y), 0.06, 0.3);
       for (const s of skies) s.sunPosition.value.copy(sunDir);
 
@@ -173,7 +194,7 @@ export function createDaylight(renderer: THREE.WebGPURenderer, scene: THREE.Scen
       haze.value = 0.0003 + 0.00045 * low * day + 0.0012 * mist.value + 0.0004 * wet.value;
       scene.environmentIntensity = 0.25 * day + 0.08;
       // A high sun makes the sky far brighter, so exposure comes down as it climbs.
-      renderer.toneMappingExposure = 0.9 - 0.4 * ss(sunDir.y, 0.15, 0.85) + night.value * 0.5;
+      renderer.toneMappingExposure = exposure.value = 0.9 - 0.4 * ss(sunDir.y, 0.15, 0.85) + night.value * 0.5;
 
       sky.position.copy(eye);
       dome.position.copy(eye);

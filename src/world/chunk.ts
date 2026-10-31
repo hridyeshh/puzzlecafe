@@ -1,7 +1,8 @@
 // One chunk of terrain: heights carved around roads and pads, plus the roads, junctions and POIs it owns.
+import { riverAt, urban } from './cities.ts';
 import { type Fields, type Sample, smoothstep } from './fields.ts';
 import { hash, rand } from './hash.ts';
-import type { Poi } from './pois.ts';
+import { type Poi, SETBACK } from './pois.ts';
 import { type Junction, type Near, ROAD_HALF, type Road, type RoadIndex } from './roads.ts';
 
 export const CHUNK = 256; // m per chunk side
@@ -9,7 +10,7 @@ export const RES = 128; // grid cells per chunk side at full detail
 export const STEP = CHUNK / RES; // 2 m between samples
 export const N = RES + 3; // samples per side, with a one-sample border so edge normals match the neighbour's
 export const FLAT = ROAD_HALF + 3; // half width of the flat strip a road sits on
-const BLEND = 14; // m over which that strip meets the land
+const BLEND = 7; // m over which that strip meets the land: short, so beside a cliff road the ground falls away at once
 export const REACH = FLAT + 140; // m over which hills fade back in beside a road
 const LATTICE = 16; // m between the road distances the hills fade reads
 export const FAR = REACH + 50; // lattice distances are capped here, so areas that see different far roads still agree
@@ -27,6 +28,7 @@ export const BROOM = 7;
 export const LAVENDER = 8;
 export const CACTUS = 9;
 const COVER_CELL = 3; // m between ground-cover candidates
+const bank = { across: 0, past: 0 };
 const NO_ROAD: Near = { d: Infinity, h: 0 };
 
 /** Road surface relative to the chunk centre: uv.x counts dash periods, uv.y is metres across; mark fades paint. */
@@ -52,6 +54,15 @@ export interface Grid {
   cont: Float32Array; // continentalness
   alpine: Float32Array; // 0–1, mountains
   arid: Float32Array; // 0–1, desert
+  town: Float32Array; // 0–1, how built up a city is (see `urban`)
+}
+
+/** A footprint that nothing grows on: a village house, a city building or a mandir. */
+export interface Footprint {
+  x: number;
+  z: number;
+  w: number;
+  d: number;
 }
 
 export interface ChunkData extends Grid {
@@ -72,6 +83,7 @@ export const SIGN_FUEL = 1;
 export const SIGN_BEND_RIGHT = 2; // chevrons for a bend to the driver's right
 export const SIGN_BEND_LEFT = 3;
 export const SIGN_COAST = 4; // the blue coast-road sign of the concept art
+export const SIGN_LAMP = 5; // a street lamp, its arm out over the road (+z)
 
 /** Wall faces (non-indexed triangles; uv in metres: along, up) and one box per piece for colliders. */
 export interface WallMesh {
@@ -134,6 +146,7 @@ export function sampleGrid(f: Fields, area: Area | null, cx: number, cz: number,
   const cont = new Float32Array(n * n);
   const alpine = new Float32Array(n * n);
   const arid = new Float32Array(n * n);
+  const town = new Float32Array(n * n);
   const s: Sample = { c: 0, smooth: 0, detail: 0, peak: 0, alpine: 0, arid: 0 };
   const near: Near = { d: 0, h: 0 };
   for (let i = 0; i < n; i++) {
@@ -149,12 +162,14 @@ export function sampleGrid(f: Fields, area: Area | null, cx: number, cz: number,
       cont[k] = s.c;
       alpine[k] = s.alpine;
       arid[k] = s.arid;
+      town[k] = f.city ? urban(f.city, x, z) : 0;
     }
   }
-  return { heights, roadDist, cont, alpine, arid };
+  return { heights, roadDist, cont, alpine, arid, town };
 }
 
-export function buildChunk(f: Fields, area: Area, cx: number, cz: number): ChunkData {
+/** Chunk (cx, cz) at full detail; nothing grows where `built` stands. */
+export function buildChunk(f: Fields, area: Area, cx: number, cz: number, built: Footprint[] = []): ChunkData {
   const x0 = cx * CHUNK;
   const z0 = cz * CHUNK;
   const grid = sampleGrid(f, area, cx, cz, RES);
@@ -185,7 +200,7 @@ export function buildChunk(f: Fields, area: Area, cx: number, cz: number): Chunk
     junctions,
     pois: area.pois.filter((p) => owns(p.x, p.z)),
     ribbon: roadMesh(roads, area.junctions, junctions, roadH, x0 + CHUNK / 2, z0 + CHUNK / 2),
-    plants: plants(f, cx, cz, grid, area.pois),
+    plants: plants(f, cx, cz, grid, area.pois, built),
     ...barriers(f, area.roads, area.junctions, area.pois, owns, x0 + CHUNK / 2, z0 + CHUNK / 2),
     signs: signs(f, roads, area, owns, x0 + CHUNK / 2, z0 + CHUNK / 2),
   };
@@ -196,7 +211,8 @@ const AHEAD = 90; // m before a café or station; short enough that the chunk ho
 
 /**
  * Road signs this chunk owns: café and fuel signs 90 m before each café and station, on the driver's right in both
- * directions; chevrons on the outside of sharp bends, one per direction; now and then a coast-road sign.
+ * directions, and street lamps along their stretch of road; chevrons on the outside of sharp bends, one per direction;
+ * now and then a coast-road sign.
  */
 function signs(f: Fields, roads: Road[], area: Area, owns: (x: number, z: number) => boolean, ox: number, oz: number) {
   const out: number[] = [];
@@ -210,9 +226,9 @@ function signs(f: Fields, roads: Road[], area: Area, owns: (x: number, z: number
 
   // Café and fuel signs: find the road at the POI's front, walk AHEAD metres each way, face back toward it.
   for (const p of area.pois) {
-    if (p.kind === 'hoarding') continue;
-    const ax = p.x + Math.sin(p.yaw) * 34;
-    const az = p.z + Math.cos(p.yaw) * 34;
+    if (p.kind === 'hoarding' || p.kind === 'bookstore') continue;
+    const ax = p.x + Math.sin(p.yaw) * SETBACK[p.kind];
+    const az = p.z + Math.cos(p.yaw) * SETBACK[p.kind];
     let road: Road | null = null;
     let at = 0;
     let best = 12;
@@ -234,6 +250,20 @@ function signs(f: Fields, roads: Road[], area: Area, owns: (x: number, z: number
       const l = Math.hypot(road.x[k - step] - road.x[k], road.z[k - step] - road.z[k]) || 1;
       put(road, road.x[k], road.z[k], road.h[k], (road.x[k - step] - road.x[k]) / l, (road.z[k - step] - road.z[k]) / l, p.kind === 'cafe' ? SIGN_CAFE : SIGN_FUEL);
     }
+    // Street lamps on its side of the road, 15, 45, 75 and 105 m each way (clear of the signs at 90), arms over the road.
+    const side = Math.sign((p.x - road.x[at]) * road.nx[at] + (p.z - road.z[at]) * road.nz[at]) || 1;
+    for (const step of [1, -1]) {
+      let walked = 0;
+      let next = 15;
+      for (let k = at; next <= 105 && k + step >= 0 && k + step < road.x.length; k += step) {
+        walked += Math.hypot(road.x[k + step] - road.x[k], road.z[k + step] - road.z[k]);
+        if (walked < next) continue;
+        next += 30;
+        const [nx, nz] = [road.nx[k + step] * side, road.nz[k + step] * side];
+        const [lx, lz] = [road.x[k + step] + nx * (road.half + SIGN_OFF), road.z[k + step] + nz * (road.half + SIGN_OFF)];
+        if (owns(lx, lz) && clear(lx, lz)) out.push(lx - ox, road.h[k + step], lz - oz, Math.atan2(-nx, -nz), SIGN_LAMP);
+      }
+    }
   }
 
   // Bends: where the road turns more than ~17° within ±24 m, at the sharpest point, for both directions.
@@ -247,17 +277,22 @@ function signs(f: Fields, roads: Road[], area: Area, owns: (x: number, z: number
       return Math.atan2(ax * bz - az * bx, ax * bx + az * bz); // > 0: a right turn going up k
     };
     for (let k = 4; k + 4 < r.x.length; k++) {
-      const t = turn(k);
-      if (Math.abs(t) < 0.3 || Math.abs(t) < Math.abs(turn(k - 1)) || Math.abs(t) < Math.abs(turn(k + 1))) continue;
-      if (apexes.some(([x, z]) => Math.hypot(x - r.x[k], z - r.z[k]) < 60)) continue;
-      apexes.push([r.x[k], r.z[k]]);
-      const l = Math.hypot(r.x[k + 1] - r.x[k - 1], r.z[k + 1] - r.z[k - 1]) || 1;
-      const [tx, tz] = [(r.x[k + 1] - r.x[k - 1]) / l, (r.z[k + 1] - r.z[k - 1]) / l];
+      const t = Math.abs(turn(k));
+      if (t < 0.3 || t < Math.abs(turn(k - 1)) - 1e-6 || t < Math.abs(turn(k + 1)) - 1e-6) continue;
+      // A hairpin turns as sharply all along its arc: the signs go at the middle of it.
+      let e = k;
+      while (e + 5 < r.x.length && Math.abs(turn(e + 1)) > t * 0.97) e++;
+      const a = (k + e) >> 1;
+      k = e;
+      if (apexes.some(([x, z]) => Math.hypot(x - r.x[a], z - r.z[a]) < 60)) continue;
+      apexes.push([r.x[a], r.z[a]]);
+      const l = Math.hypot(r.x[a + 1] - r.x[a - 1], r.z[a + 1] - r.z[a - 1]) || 1;
+      const [tx, tz] = [(r.x[a + 1] - r.x[a - 1]) / l, (r.z[a + 1] - r.z[a - 1]) / l];
       // Both on the outside of the bend, one facing each way: on the left of whoever turns right, and the right of
       // whoever turns left (the same bend, driven the other way).
-      const right = t > 0; // going up k
-      put(r, r.x[k] - tx * 1.5, r.z[k] - tz * 1.5, r.h[k], tx, tz, right ? SIGN_BEND_RIGHT : SIGN_BEND_LEFT, right ? -1 : 1);
-      put(r, r.x[k] + tx * 1.5, r.z[k] + tz * 1.5, r.h[k], -tx, -tz, right ? SIGN_BEND_LEFT : SIGN_BEND_RIGHT, right ? 1 : -1);
+      const right = turn(a) > 0; // going up k
+      put(r, r.x[a] - tx * 1.5, r.z[a] - tz * 1.5, r.h[a], tx, tz, right ? SIGN_BEND_RIGHT : SIGN_BEND_LEFT, right ? -1 : 1);
+      put(r, r.x[a] + tx * 1.5, r.z[a] + tz * 1.5, r.h[a], -tx, -tz, right ? SIGN_BEND_LEFT : SIGN_BEND_RIGHT, right ? 1 : -1);
     }
   }
 
@@ -394,11 +429,11 @@ function barriers(f: Fields, roads: Road[], junctions: Junction[], pois: Poi[], 
 }
 
 function slice(r: Road, a: number, b: number): Road {
-  return { coast: r.coast, id: r.id, half: r.half, x: r.x.slice(a, b), z: r.z.slice(a, b), h: r.h.slice(a, b), nx: r.nx.slice(a, b), nz: r.nz.slice(a, b) };
+  return { ...r, x: r.x.slice(a, b), z: r.z.slice(a, b), h: r.h.slice(a, b), nx: r.nx.slice(a, b), nz: r.nz.slice(a, b) };
 }
 
-/** m radius of a junction's asphalt patch: just covers its widest roads crossing. */
-const disc = (j: Junction) => j.half + 2;
+/** m radius of a junction's asphalt patch: fills the wedge where a road bends through it, without a bulge past the far edge. */
+const disc = (j: Junction) => j.half + 0.5;
 
 /** Ribbons for `roads` and discs for the junctions in `own`; paint fades near any junction in `near`. */
 function roadMesh(
@@ -462,11 +497,25 @@ function roadMesh(
  * Trees, pines, bushes and rocks: one candidate per world-aligned cell, kept by place (woods, coast, slope). Near the
  * sea it is Mediterranean: thick scrub, olives, cypresses and the odd pine.
  */
-function plants(f: Fields, cx: number, cz: number, { heights, roadDist, cont, alpine, arid }: Grid, pois: Poi[]) {
+function plants(f: Fields, cx: number, cz: number, { heights, roadDist, cont, alpine, arid, town }: Grid, pois: Poi[], built: Footprint[]) {
   const out: number[] = [];
   const x0 = cx * CHUNK;
   const z0 = cz * CHUNK;
   const at = { h: 0, c: 0, road: 0, slope: 0, a: 0, d: 0 };
+  // Footprints bucketed on a 16 m grid, each in every cell it reaches, so a spot checks only those in its own cell.
+  const cells = new Map<number, Footprint[]>();
+  for (const h of built) {
+    const r = Math.hypot(h.w, h.d) / 2 + 1.5;
+    for (let gx = Math.floor((h.x - r) / 16); gx <= Math.floor((h.x + r) / 16); gx++) {
+      for (let gz = Math.floor((h.z - r) / 16); gz <= Math.floor((h.z + r) / 16); gz++) {
+        const key = gx * 65536 + gz;
+        const list = cells.get(key);
+        if (list) list.push(h);
+        else cells.set(key, [h]);
+      }
+    }
+  }
+  const blocked = (x: number, z: number) => !!cells.get(Math.floor(x / 16) * 65536 + Math.floor(z / 16))?.some((h) => Math.hypot(x - h.x, z - h.z) < Math.hypot(h.w, h.d) / 2 + 1.5);
   /** Ground at world (x, z) in this chunk, from the sample grid; false where nothing should grow. */
   const ground = (x: number, z: number) => {
     const u = (x - x0) / STEP + 1;
@@ -482,11 +531,22 @@ function plants(f: Fields, cx: number, cz: number, { heights, roadDist, cont, al
     at.slope = Math.hypot(heights[k + N] - heights[k - N], heights[k + 1] - heights[k - 1]) / (2 * STEP);
     at.a = alpine[k];
     at.d = arid[k];
-    // Clear of cafés' and stations' pads, and of hoardings out to the road, so nothing hides a board.
-    return at.h >= 2.5 && at.c >= 0.03 && !pois.some((p) => Math.hypot(x - p.x, z - p.z) < (p.pad > 0 ? p.pad + 8 : 22));
+    // Clear of cafés' and stations' pads, of hoardings out to the road (so nothing hides a board) and of buildings. In a
+    // city only where it is open land: its outskirts thin out into trees and fields, its middle grows nothing; and never
+    // down by its river.
+    const c = f.city;
+    const inCity = !!c && Math.hypot(x - c.x, z - c.z) < c.ring + 20;
+    return (
+      at.h >= 2.5 &&
+      at.c >= 0.03 &&
+      (!inCity || (at.h > c.level - 0.5 && hash(f.seed, Math.round(x * 4), Math.round(z * 4), 7) / 4294967296 > town[k] / 0.5)) &&
+      !pois.some((p) => Math.hypot(x - p.x, z - p.z) < (p.pad > 0 ? p.pad + 8 : 22)) &&
+      !blocked(x, z)
+    );
   };
+  // Sunk a little into slopes, so nothing stands on the downhill air.
   const push = (x: number, z: number, scale: number, yaw: number, kind: number) =>
-    out.push(x - (x0 + CHUNK / 2), at.h - 0.15, z - (z0 + CHUNK / 2), scale, yaw, kind);
+    out.push(x - (x0 + CHUNK / 2), at.h - 0.15 - Math.min(at.slope, 1.5) * 0.4 * scale, z - (z0 + CHUNK / 2), scale, yaw, kind);
 
   for (let i = Math.floor(x0 / PLANT_CELL); i <= Math.floor((x0 + CHUNK) / PLANT_CELL); i++) {
     for (let j = Math.floor(z0 / PLANT_CELL); j <= Math.floor((z0 + CHUNK) / PLANT_CELL); j++) {
@@ -494,20 +554,30 @@ function plants(f: Fields, cx: number, cz: number, { heights, roadDist, cont, al
       const x = (i + r(1)) * PLANT_CELL;
       const z = (j + r(2)) * PLANT_CELL;
       if (x < x0 || x >= x0 + CHUNK || z < z0 || z >= z0 + CHUNK) continue;
-      if (!ground(x, z) || at.road < ROAD_HALF + 2.5) continue;
+      if (!ground(x, z)) {
+        // Boulders in the surf along the shore, half out of the water.
+        if (at.c > -0.01 && at.c < 0.01 && at.h > -2.5 && at.h < 1 && r(3) < 0.05) push(x, z, 1.6 + r(5) * 2.4, r(6) * Math.PI * 2, ROCK);
+        continue;
+      }
+      if (at.road < ROAD_HALF + 2.5) continue;
       const { h, c, slope, a, d } = at;
       const nearRoad = at.road < FLAT + 4; // only scrub this close, up to the shoulder; trees and rocks stand back
       const woods = smoothstep(0.45, 0.75, f.woods(x, z)) * smoothstep(0.08, 0.16, c);
       const coastal = 1 - smoothstep(0.1, 0.2, c);
-      // Mountains: conifer forest up to the tree line and rock; desert: a dry bush or a rock here and there.
-      const tree = (0.015 + 0.4 * woods + 0.05 * coastal + 0.25 * a * (1 - smoothstep(380, 460, h))) * (1 - smoothstep(0.1, 0.4, d));
+      // Mountains: conifer forest up to the tree line and rock; desert: a dry bush or a rock here and there. Round a city
+      // the trees are broadleaf, not the upland pines; across its river, an open floodplain of grass and scrub.
+      const town = f.city;
+      const city = !!town && Math.hypot(x - town.x, z - town.z) < town.ring + 900;
+      const floodplain = !!town && Math.hypot(x - town.x, z - town.z) < town.ring && riverAt(town, x, z, bank).across < town.half;
+      const tree = floodplain ? 0 : (0.015 + 0.4 * woods + 0.05 * coastal + 0.25 * a * (1 - smoothstep(380, 460, h))) * (1 - smoothstep(0.1, 0.4, d));
       const bush = (0.05 + 0.22 * coastal) * (1 - 0.5 * d);
       const roll = r(3);
       const pick = r(4);
       let kind = -1;
-      if (slope > 0.7) kind = roll < 0.06 ? ROCK : -1;
+      // Steep ground: bare rock, but maquis clings to the sea cliffs.
+      if (slope > 0.7) kind = roll < 0.06 ? ROCK : roll < 0.06 + 0.28 * coastal * (1 - smoothstep(0.9, 1.6, slope)) ? BUSH : -1;
       else if (roll < tree && coastal > 0.5) kind = pick < 0.3 ? CYPRESS : pick < 0.85 ? OLIVE : PINE;
-      else if (roll < tree) kind = a > 0.4 || h > 55 || pick < 0.35 ? PINE : TREE;
+      else if (roll < tree) kind = a > 0.4 || (h > 55 && !city) || pick < (city ? 0.08 : 0.35) ? PINE : TREE;
       else if (roll < tree + bush) kind = BUSH;
       else if (roll < tree + bush + 0.012 + 0.03 * a + 0.02 * d) kind = ROCK;
       else if (roll < tree + bush + 0.032 + 0.03 * a + 0.05 * d && d > 0.5) kind = CACTUS;
@@ -524,6 +594,12 @@ function plants(f: Fields, cx: number, cz: number, { heights, roadDist, cont, al
       const z = (j + r(2)) * COVER_CELL;
       if (x < x0 || x >= x0 + CHUNK || z < z0 || z >= z0 + CHUNK) continue;
       if (!ground(x, z) || at.road < ROAD_HALF + 1.5 || at.road > 45 || at.slope > 0.5) continue;
+      // A band of shrubs 3 to 9 m off the asphalt, thickest by the sea, as in the concepts; not in desert or mountains.
+      const band = at.road > ROAD_HALF + 3 && at.road < ROAD_HALF + 9 ? 0.5 * (1 - smoothstep(0.15, 0.35, at.c)) * (1 - at.d) * (1 - at.a) : 0;
+      if (r(7) < band) {
+        push(x, z, 0.55 + r(8) * 0.5, r(6) * Math.PI * 2, BUSH);
+        continue;
+      }
       const roll = r(3);
       if (roll > 0.72 * (1 - 0.7 * at.d)) continue; // sparse in the desert
       // Flowers: lavender by the sea and in alpine meadows, broom elsewhere; the desert has only dry grass.

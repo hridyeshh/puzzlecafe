@@ -1,7 +1,9 @@
 // The world: pure functions of a seed. Areas around chunks are cached; chunks are built on demand.
+import { MANDIR, MANDIR_FOOT, makeBlocks } from './blocks.ts';
 import { type Area, CHUNK, buildChunk, farAt, latticeDist, sampleGrid, shape } from './chunk.ts';
 import { COAST_C, type Sample, makeFields } from './fields.ts';
 import { placePois } from './pois.ts';
+import { makeVillages } from './villages.ts';
 import { LANE, type Near, RoadIndex, makeRoads, traceCoast } from './roads.ts';
 
 const MARGIN = 200; // m of roads and junctions loaded around a chunk
@@ -39,6 +41,20 @@ export function makeWorld(seed: number) {
     const pads = a.pois.filter((p) => p.pad > 0);
     return shape(fields.sample(x, z, sample), a.index.near(x, z, near), far, pads, x, z);
   }
+
+  const villages = makeVillages(fields, area, heightAt);
+  // The city's buildings, spires and towers, made the first time a tile near it asks.
+  const c = fields.city;
+  const buildings = c ? makeBlocks(seed, c, () => roads.grid(c.x - c.ring - 20, c.z - c.ring - 20, c.x + c.ring + 20, c.z + c.ring + 20).roads.filter((r) => r.city)) : null;
+  /** Houses whose middles are in chunk (cx, cz), widened by `margin` m. */
+  const houses = (cx: number, cz: number, margin = 0) =>
+    villages.houses(cx * CHUNK - margin, cz * CHUNK - margin, (cx + 1) * CHUNK + margin, (cz + 1) * CHUNK + margin);
+  /** What plants keep clear of in chunk (cx, cz) and 20 m around: houses, the city's buildings and its mandirs. */
+  const built = (cx: number, cz: number) => {
+    const box = [cx * CHUNK - 20, cz * CHUNK - 20, (cx + 1) * CHUNK + 20, (cz + 1) * CHUNK + 20] as const;
+    const mandirs = (buildings?.props(...box) ?? []).filter((p) => p.kind === MANDIR).map((p) => ({ x: p.x, z: p.z, w: 2 * MANDIR_FOOT * p.s, d: 2 * MANDIR_FOOT * p.s }));
+    return [...villages.houses(...box), ...(buildings?.blocks(...box) ?? []), ...mandirs];
+  };
 
   /** The right lane of the coast road nearest the origin, heading with the sea on the right. */
   function spawn(): { x: number; z: number; yaw: number } {
@@ -95,7 +111,14 @@ export function makeWorld(seed: number) {
     heightAt,
     spawn,
     mapData,
-    chunk: (cx: number, cz: number) => buildChunk(fields, area(cx, cz), cx, cz),
+    villages,
+    houses,
+    buildings,
+    /** City buildings whose middles are in chunk (cx, cz). */
+    blocks: (cx: number, cz: number) => buildings?.blocks(cx * CHUNK, cz * CHUNK, (cx + 1) * CHUNK, (cz + 1) * CHUNK) ?? [],
+    /** The city's props (rooftop tanks, signs, crowns, mandirs) whose middles are in chunk (cx, cz). */
+    props: (cx: number, cz: number) => buildings?.props(cx * CHUNK, cz * CHUNK, (cx + 1) * CHUNK, (cz + 1) * CHUNK) ?? [],
+    chunk: (cx: number, cz: number) => buildChunk(fields, area(cx, cz), cx, cz, built(cx, cz)), // plants keep clear of buildings
     /** Chunk (cx, cz) sampled at `res` cells a side for distant tiles; roads carve it only when `roads` is set. */
     grid: (cx: number, cz: number, res: number, roads: boolean) => sampleGrid(fields, roads ? area(cx, cz) : null, cx, cz, res),
   };

@@ -11,7 +11,7 @@ import { BROOM, BUSH, CACTUS, CYPRESS, GRASS, LAVENDER, OLIVE, PINE, ROCK, TREE 
  * vertices in and out for an organic outline; it darkens toward its base, a cheap ambient occlusion. Faces stay flat.
  * `leafy` parts turn with the seasons.
  */
-function piece(g: THREE.BufferGeometry, hex: number, x: number, y: number, z: number, scale = [1, 1, 1], lumpy = 0, tilt = 0, leafy = 0) {
+export function piece(g: THREE.BufferGeometry, hex: number, x: number, y: number, z: number, scale = [1, 1, 1], lumpy = 0, tilt = 0, leafy = 0) {
   const out = (g.index ? g.toNonIndexed() : g).scale(scale[0], scale[1], scale[2]).rotateZ(tilt).translate(x, y, z);
   const p = out.getAttribute('position');
   out.computeBoundingBox();
@@ -108,7 +108,7 @@ const shapes: Record<number, THREE.BufferGeometry> = {
   [GRASS]: tuft(9, 0.6, 0x5d6b2c, 0xc2ad5c),
   [BROOM]: mergeGeometries([
     piece(blob(0.45), 0x5e7034, 0, 0.3, 0, [1.1, 0.75, 1.1], 0.15, 0, 1),
-    ...dotted(14, 0.42, 0.5, () => new THREE.IcosahedronGeometry(0.07, 0), 0xe8c22a),
+    ...dotted(14, 0.42, 0.5, () => new THREE.OctahedronGeometry(0.07, 0), 0xe8c22a), // 7 cm flowers: 8 triangles do
   ]),
   [LAVENDER]: mergeGeometries([
     piece(blob(0.32), 0x7d8a6a, 0, 0.2, 0, [1.1, 0.7, 1.1], 0.12),

@@ -1,4 +1,5 @@
-// Autodrive: keeps the car in the right lane of the road it is on, slows for bends, picks a way at junctions.
+// Autodrive: keeps the car in the right lane of the road it is on, slows for bends, picks a way at junctions (at random,
+// or toward a target: the police use it to chase along roads).
 import type { Intent } from './physics.ts';
 import { CHUNK } from './world/chunk.ts';
 import { type Road, laneOf } from './world/roads.ts';
@@ -6,6 +7,7 @@ import type { World } from './world/world.ts';
 
 const WHEELBASE = 2.65; // m, front to rear axle
 const CRUISE = 22; // m/s, about 80 km/h
+const PASS = 12; // m/s, about 45 km/h, over mountain passes: hairpins come every 180 m
 const GRIP = 3; // m/s² of sideways acceleration it allows in bends
 const LINK = 2.5; // m within which road ends count as joined
 
@@ -15,7 +17,8 @@ interface Cursor {
   sign: 1 | -1; // walking toward k + 1 (1) or k (-1)
 }
 
-export function createAutodrive(world: World) {
+/** `grip`: the sideways acceleration it allows in bends, m/s². */
+export function createAutodrive(world: World, grip = GRIP) {
   const choices = new Map<string, number>(); // junction → way taken, so the choice holds while passing it
 
   /** Ways on from (x, z) heading (dx, dz): road starts and ends there, or the middle of a road it meets. */
@@ -43,8 +46,11 @@ export function createAutodrive(world: World) {
     return out.sort((a, b) => a.angle - b.angle).map((o) => o.c);
   }
 
-  /** An inland road starting on the coast road's segment k, if the car decides (once, 30%) to turn into it. */
-  function branch(roads: Road[], from: Road, k: number, dx: number, dz: number): Cursor | null {
+  /**
+   * An inland road starting on the coast road's segment k, if the car decides (once, 30%) to turn into it; with a
+   * target, if the road points at it better than the coast road does.
+   */
+  function branch(roads: Road[], from: Road, k: number, dx: number, dz: number, toward: Target): Cursor | null {
     if (!from.coast) return null;
     for (const r of roads) {
       if (r.coast) continue;
@@ -55,6 +61,10 @@ export function createAutodrive(world: World) {
         if (segDist(from, k, r.x[end], r.z[end]) > LINK) continue;
         const [tx, tz] = dir(r, c.k, c.sign);
         if (tx * dx + tz * dz < -0.2) continue;
+        if (toward) {
+          if (pointing(toward, r.x[end], r.z[end], tx, tz) > pointing(toward, r.x[end], r.z[end], dx, dz)) return c;
+          continue;
+        }
         const key = `side ${Math.round(r.x[end])},${Math.round(r.z[end])}`;
         let take = choices.get(key);
         if (take === undefined) choices.set(key, (take = Math.random() < 0.3 ? 1 : 0));
@@ -65,8 +75,11 @@ export function createAutodrive(world: World) {
   }
 
   return {
-    /** Pedals and steering for a car at world (x, z) heading `yaw` at `v` m/s, or null with no road nearby. */
-    drive(x: number, z: number, yaw: number, v: number): Intent | null {
+    /**
+     * Pedals and steering for a car at world (x, z) heading `yaw` at `v` m/s, or null with no road nearby. At junctions
+     * it takes the way that points most nearly at world point `toward`, if given; it cruises at up to `cruise` m/s.
+     */
+    drive(x: number, z: number, yaw: number, v: number, toward: Target = null, cruise = CRUISE): Intent | null {
       const roads = world.area(Math.floor(x / CHUNK), Math.floor(z / CHUNK)).roads;
       const fx = Math.sin(yaw);
       const fz = Math.cos(yaw);
@@ -88,7 +101,8 @@ export function createAutodrive(world: World) {
       if (!cur) return null;
 
       // Walk ahead along the road: aim at `look` metres, read the bends over twice that.
-      const look = 8 + Math.abs(v) * 0.9;
+      // Over a pass it looks closer: pursuing a point 15 m round a 22 m hairpin cuts the bend by ~1.7 m.
+      const look = cur.r.pass ? 4 + Math.abs(v) * 0.6 : 8 + Math.abs(v) * 0.9;
       let { r, k, sign } = cur;
       let px = r.x[k];
       let pz = r.z[k];
@@ -112,14 +126,17 @@ export function createAutodrive(world: World) {
         walked += gap;
         px = r.x[vi];
         pz = r.z[vi];
-        let next = branch(roads, r, k, dx, dz);
+        let next = branch(roads, r, k, dx, dz, toward);
         if (next) {
           px = next.r.x[next.sign > 0 ? 0 : next.r.x.length - 1];
           pz = next.r.z[next.sign > 0 ? 0 : next.r.z.length - 1];
         } else if (sign > 0 ? vi + 1 < r.x.length : vi - 1 >= 0) next = { r, k: sign > 0 ? vi : vi - 1, sign };
         else {
           const options = ways(roads, r, px, pz, dx, dz);
-          if (options.length > 0) {
+          if (options.length > 0 && toward) {
+            const score = (c: Cursor) => pointing(toward, px, pz, ...dir(c.r, c.k, c.sign));
+            next = options.reduce((a, b) => (score(b) > score(a) ? b : a));
+          } else if (options.length > 0) {
             const key = `${Math.round(px)},${Math.round(pz)}`;
             let pick = choices.get(key);
             if (pick === undefined) {
@@ -150,12 +167,20 @@ export function createAutodrive(world: World) {
       const steer = Math.max(-1, Math.min(1, angle / lock));
 
       const bendiness = turned / Math.max(walked, 1);
-      let target = Math.min(CRUISE, Math.sqrt(GRIP / Math.max(bendiness, 1e-4)));
+      let target = Math.min(cur.r.pass ? Math.min(PASS, cruise) : cruise, Math.sqrt(grip / Math.max(bendiness, 1e-4)));
       if (sharp) target = Math.min(target, 9);
       const dv = target - v;
       return { steer, throttle: dv > 0 ? Math.min(1, dv / 4) : 0, brake: dv < -1.5 ? Math.min(1, -dv / 6) : 0 };
     },
   };
+}
+
+/** A world point to head for, or none. */
+type Target = [number, number] | null;
+
+/** How directly unit direction (dx, dz) from (x, z) points at `t`: the cosine of the angle between them. */
+function pointing(t: [number, number], x: number, z: number, dx: number, dz: number) {
+  return (dx * (t[0] - x) + dz * (t[1] - z)) / (Math.hypot(t[0] - x, t[1] - z) || 1);
 }
 
 function project(r: Road, k: number, x: number, z: number) {

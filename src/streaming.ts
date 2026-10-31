@@ -1,12 +1,15 @@
 // Streams tiles around the car: workers build them nearest first, here they become meshes, props, plants and colliders.
 import * as THREE from 'three/webgpu';
-import { attribute, color, cos, float, fract, fwidth, max, mix, mx_noise_float, normalWorld, positionWorld, smoothstep, uniform, uv, vec2, vec3, vertexColor } from 'three/tsl';
-import { RAPIER, addTerrain } from './physics.ts';
+import { attribute, color, cos, float, fract, fwidth, max, mix, mx_noise_float, normalView, normalWorld, positionView, positionWorld, smoothstep, step, uniform, uv, vec2, vec3, vertexColor } from 'three/tsl';
+import { RAPIER, addFixed, addTerrain } from './physics.ts';
+import { blockMesh, disposeBlocks, disposeProps, propMeshes } from './city.ts';
+import { disposeHouses, houseMesh } from './houses.ts';
 import { disposePlants, plantCollider, plantMeshes } from './plants.ts';
 import { makeProp, makeSign } from './props.ts';
-import { terrainIndex } from './terrain.ts';
+import { RED_ROCK, ROCK, terrainIndex } from './terrain.ts';
 import { LODS, type Tile } from './tile.ts';
 import { grassTint, snowCover, wet, winter } from './weather.ts';
+import { MANDIR, MANDIR_FOOT } from './world/blocks.ts';
 import { CHUNK, type RoadMesh } from './world/chunk.ts';
 import { ROAD_HALF } from './world/roads.ts';
 
@@ -23,31 +26,61 @@ interface Loaded {
   body: RAPIER.RigidBody | null; // fixed, at the tile centre, holding its colliders: a rebase moves one body, not thousands of colliders
   owned: THREE.BufferGeometry[]; // geometries only this tile uses
   flora: THREE.Mesh[];
+  homes: THREE.Mesh | null; // the tile's village houses
+  town: THREE.Mesh | null; // the tile's city buildings
+  kit: THREE.Mesh[]; // their props: rooftop tanks and towers, aerials, signs, crowns, mandirs
   stations: Station[];
 }
 
 // The ground: the tile's vertex colours (grass, dry grass, sand, rock, gravel), with detail drawn per pixel from noise
-// anchored to the world (hence the origin): drier and greener patches, grain, strata on steep rock, wet sand at the sea.
+// anchored to the world (hence the origin): drier and greener patches, grain, rock on steep ground, wet sand at the sea.
+// In a city it is paved where the city is built up, patchy where it thins out into open land, and sand down by its river.
 const originXZ = uniform(new THREE.Vector2());
+/** The city: its middle (world x, z), the radius of its ring (negative: no city) and its level. */
+export const townAt = uniform(new THREE.Vector4(0, 0, -1, 0));
 const ground = new THREE.MeshStandardNodeMaterial({ vertexColors: true });
 {
   const p = positionWorld.xz.add(originXZ);
-  const patches = smoothstep(0.05, 0.6, mx_noise_float(p.mul(0.022)));
+  const y = positionWorld.y;
+  const patches = smoothstep(-0.3, 0.45, mx_noise_float(p.mul(0.022))); // golden dry grass over most of it
   const mottle = mx_noise_float(p.mul(0.16)).mul(0.08);
   const grain = mx_noise_float(p.mul(0.6)).add(mx_noise_float(p.mul(2.7))).mul(0.06).add(mottle).add(1);
-  const steep = smoothstep(0.85, 0.6, normalWorld.y);
-  const strata = mx_noise_float(vec3(positionWorld.y.mul(1.4), p.mul(0.02))).mul(0.06).add(0.97);
-  const shore = smoothstep(0.9, 0.25, positionWorld.y); // wet sand at the waterline
-  const dry = mix(vec3(1), vec3(1.4, 1.16, 0.68), patches)
-    .mul(grain)
-    .mul(mix(float(1), strata, steep))
+  // Steep ground is rock: by the smooth normal, and by the triangle's own (from screen-space derivatives), so a cliff a
+  // single tall triangle wide in a far tile is rock too, not a blend of the grass above it and the sand below.
+  const faceWorld = positionWorld.dFdx().cross(positionWorld.dFdy()).normalize();
+  const sheer = smoothstep(0.75, 0.55, faceWorld.y.abs());
+  const steep = max(smoothstep(0.85, 0.6, normalWorld.y), sheer);
+  // Rock: blotches of lighter and darker stone, and gullies: noise over the ground plan alone, which on a steep face
+  // runs straight down it. (Level bands read as stripes or a concrete wall; 3D noise sliced by a slope, as contours.)
+  const gully = smoothstep(-0.3, 0.5, mx_noise_float(p.mul(0.07)));
+  const blotch = mx_noise_float(vec3(p.mul(0.09), y.mul(0.09))).mul(0.16).add(grain).sub(0.03);
+  const stone = mix(vec3(...ROCK), vec3(...RED_ROCK), smoothstep(0.4, 0.6, attribute('arid', 'float')));
+  const rock = stone.mul(blotch.mul(gully.mul(0.4).add(0.66))).div(vertexColor()); // the material multiplies by the vertex colour
+  const shore = smoothstep(0.9, 0.25, y); // wet sand at the waterline
+  const dry = mix(mix(vec3(1), vec3(1.4, 1.16, 0.68), patches).mul(grain).mul(grassTint), rock, steep) // the season, on what grows
     .mul(mix(float(1), float(0.62), shore))
-    .mul(wet.mul(-0.2).add(1)) // rain darkens it
-    .mul(grassTint); // the season
+    .mul(wet.mul(-0.2).add(1)); // rain darkens it
   // Snow lies on level enough ground where it is cold (inland, not desert): after snowfall, and all winter.
   const lying = max(snowCover, winter).mul(attribute('cold', 'float')).mul(smoothstep(0.55, 0.9, normalWorld.y));
-  ground.colorNode = mix(dry, vec3(0.92, 0.94, 0.97).div(vertexColor()), lying);
+  const ring = smoothstep(townAt.z.add(25), townAt.z.sub(5), p.sub(townAt.xy).length()).mul(step(0, townAt.z));
+  const sand = ring.mul(smoothstep(townAt.w.sub(0.3), townAt.w.sub(1.2), y));
+  const paved = smoothstep(0.12, 0.4, attribute('town', 'float').add(mx_noise_float(p.mul(0.03)).mul(0.12)));
+  const paving = color(0x6e675f).mul(grain).mul(wet.mul(-0.25).add(1));
+  const urban = mix(mix(dry, paving.div(vertexColor()), paved), color(0xb39d78).mul(grain).div(vertexColor()), sand);
+  ground.colorNode = mix(urban, vec3(0.92, 0.94, 0.97).div(vertexColor()), lying);
   ground.roughnessNode = mix(float(0.95), float(0.4), shore);
+  // Cliff faces are lit by their own facets rather than normals smoothed into the level ground around them, and they
+  // are rough: a bump from noise (the screen-space derivative of a height in metres, after Mikkelsen's "Bump Mapping
+  // Unparametrized Surfaces"), fading out with distance before it would shimmer.
+  const [sx, sy] = [positionView.dFdx(), positionView.dFdy()];
+  const face = sx.cross(sy).normalize();
+  const n = mix(normalView, face.mul(face.dot(normalView).sign()), sheer).normalize();
+  const relief = mx_noise_float(vec3(p.mul(0.3), y.mul(0.22))).mul(0.5).add(gully.mul(0.6))
+    .mul(steep)
+    .mul(smoothstep(160, 40, positionView.z.negate()));
+  const [r1, r2] = [sy.cross(n), n.cross(sx)];
+  const det = sx.dot(r1);
+  ground.normalNode = det.abs().mul(n).sub(det.sign().mul(relief.dFdx().mul(r1).add(relief.dFdy().mul(r2)))).normalize();
 }
 
 // Asphalt with a dashed centre line and solid edge lines, painted from uv (x: dash periods, y: metres across).
@@ -137,6 +170,8 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
     geometry.setAttribute('normal', new THREE.BufferAttribute(t.mesh.normal, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(t.mesh.color, 3));
     geometry.setAttribute('cold', new THREE.BufferAttribute(t.mesh.cold, 1));
+    geometry.setAttribute('arid', new THREE.BufferAttribute(t.mesh.arid, 1));
+    geometry.setAttribute('town', new THREE.BufferAttribute(t.mesh.town, 1));
     // Terrain receives shadows but casts none: with a low sun, hill shadows would end at the shadow map's edge.
     // Slopes facing away from the sun already darken through lighting.
     const terrain = new THREE.Mesh(geometry, ground);
@@ -168,7 +203,7 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
         const desc = RAPIER.ColliderDesc.cuboid(0.3, w[i + 5], w[i + 4]) // half a stone wall's 0.6 m thickness
           .setTranslation(w[i], w[i + 1], w[i + 2])
           .setRotation({ x: 0, y: Math.sin(w[i + 3] / 2), z: 0, w: Math.cos(w[i + 3] / 2) });
-        physics.createCollider(desc, body ?? undefined);
+        addFixed(physics, desc, body ?? undefined);
       }
     }
 
@@ -180,7 +215,7 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
       sign.object.rotation.y = s[i + 3];
       group.add(sign.object);
       const b = sign.boxes[0];
-      physics.createCollider(RAPIER.ColliderDesc.cuboid(b.hx, b.hy, b.hz).setTranslation(s[i], s[i + 1] + b.y, s[i + 2]), body ?? undefined);
+      addFixed(physics, RAPIER.ColliderDesc.cuboid(b.hx, b.hy, b.hz).setTranslation(s[i], s[i + 1] + b.y, s[i + 2]), body ?? undefined);
     }
 
     // Hoardings stand on the ground, buildings on their flattened pads.
@@ -197,7 +232,7 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
         const desc = RAPIER.ColliderDesc.cuboid(b.hx, b.hy, b.hz)
           .setTranslation(px - x + b.x * cos + b.z * sin, poi.base + b.y, pz - z - b.x * sin + b.z * cos)
           .setRotation({ x: 0, y: Math.sin(poi.yaw / 2), z: 0, w: Math.cos(poi.yaw / 2) });
-        physics.createCollider(desc, body ?? undefined);
+        addFixed(physics, desc, body ?? undefined);
       }
     }
 
@@ -209,12 +244,49 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
       const shape = plantCollider(p[i + 5], p[i + 3]);
       if (!shape) continue;
       const desc = shape.shape === 'ball' ? RAPIER.ColliderDesc.ball(shape.size) : RAPIER.ColliderDesc.cylinder(shape.lift, shape.size);
-      physics.createCollider(desc.setTranslation(p[i], p[i + 1] + shape.lift, p[i + 2]), body ?? undefined);
+      addFixed(physics, desc.setTranslation(p[i], p[i + 1] + shape.lift, p[i + 2]), body ?? undefined);
+    }
+
+    // Village houses, at every detail so villages show on far hills; near ones are solid.
+    const homes = t.houses.length > 0 ? houseMesh(t.houses) : null;
+    if (homes) group.add(homes);
+    const hs = t.houses;
+    for (let i = 0; body && i < hs.length; i += 8) {
+      const [w, h, d] = [hs[i + 4], hs[i + 5], hs[i + 6]];
+      const desc = RAPIER.ColliderDesc.cuboid(w / 2, (h + 6) / 2, d / 2) // its plinth reaches 6 m down
+        .setTranslation(hs[i], hs[i + 1] + (h - 6) / 2, hs[i + 2])
+        .setRotation({ x: 0, y: Math.sin(hs[i + 3] / 2), z: 0, w: Math.cos(hs[i + 3] / 2) });
+      addFixed(physics, desc, body);
+    }
+
+    // City buildings, likewise at every detail; near ones solid.
+    const town = t.blocks.length > 0 ? blockMesh(t.blocks) : null;
+    if (town) group.add(town);
+    const bs = t.blocks;
+    for (let i = 0; body && i < bs.length; i += 8) {
+      const [w, h, d] = [bs[i + 4], bs[i + 5], bs[i + 6]];
+      const desc = RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2)
+        .setTranslation(bs[i], bs[i + 1] + h / 2, bs[i + 2])
+        .setRotation({ x: 0, y: Math.sin(bs[i + 3] / 2), z: 0, w: Math.cos(bs[i + 3] / 2) });
+      addFixed(physics, desc, body);
+    }
+
+    // Their props: on the roofs, over the streets; mandirs are solid.
+    const kit = t.props.length > 0 ? propMeshes(t.props) : [];
+    for (const mesh of kit) group.add(mesh);
+    const ps = t.props;
+    for (let i = 0; body && i < ps.length; i += 6) {
+      if (ps[i + 5] !== MANDIR) continue;
+      const half = MANDIR_FOOT * ps[i + 4];
+      const desc = RAPIER.ColliderDesc.cuboid(half, 3, half)
+        .setTranslation(ps[i], ps[i + 1] + 3, ps[i + 2])
+        .setRotation({ x: 0, y: Math.sin(ps[i + 3] / 2), z: 0, w: Math.cos(ps[i + 3] / 2) });
+      addFixed(physics, desc, body);
     }
 
     scene.add(group);
     const stations = t.pois.filter((s) => s.kind === 'station').map(({ x: sx, z: sz, yaw }) => ({ x: sx, z: sz, yaw }));
-    return { lod: t.lod, group, body, owned, flora, stations };
+    return { lod: t.lod, group, body, owned, flora, homes, town, kit, stations };
   }
 
   function remove(t: Loaded) {
@@ -224,6 +296,9 @@ export function createStreaming(scene: THREE.Scene, physics: RAPIER.World, origi
       g.dispose();
     }
     for (const mesh of t.flora) disposePlants(mesh);
+    if (t.homes) disposeHouses(t.homes);
+    if (t.town) disposeBlocks(t.town);
+    for (const mesh of t.kit) disposeProps(mesh);
     if (t.body) physics.removeRigidBody(t.body); // and its colliders
   }
 

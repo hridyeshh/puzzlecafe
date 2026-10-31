@@ -7,7 +7,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "oxlint",
-    "test": "node --test src/world/world.test.ts src/physics.test.ts src/autodrive.test.ts"
+    "test": "node --test src/world/world.test.ts src/physics.test.ts src/autodrive.test.ts src/chase.test.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",

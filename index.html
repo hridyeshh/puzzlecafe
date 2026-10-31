@@ -14,6 +14,9 @@
         --track: rgb(255 255 255 / 0.15);
         --fuel: #e9c46a;
         --low: #e76f51;
+        --nitro: #5ec8ff;
+        --siren-red: #ff3b30;
+        --siren-blue: #2f6bff;
         --night: #0b0d10;
         --gap: 14px;
         --round: 14px;
@@ -29,6 +32,16 @@
       .fuel { width: 120px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
       .fuel > i { display: block; height: 100%; background: var(--fuel); transition: width 0.3s; }
       .fuel > i.low { background: var(--low); }
+      .nitro { height: 4px; margin-top: 7px; border-radius: 2px; background: var(--track); overflow: hidden; }
+      .nitro > i { display: block; height: 100%; background: var(--nitro); }
+      #wanted { position: fixed; top: 16px; right: 20px; padding: 10px 14px; border-radius: var(--round); background: var(--glass); backdrop-filter: blur(10px); font: 600 22px/1 system-ui, sans-serif; letter-spacing: 2px; font-variant-numeric: tabular-nums; pointer-events: none; animation: siren 0.8s steps(1) infinite; }
+      #wanted .dim { color: var(--track); }
+      #wanted.lost { animation: blink 1s steps(2) infinite; }
+      @keyframes siren { 0% { box-shadow: inset 0 -3px 0 var(--siren-red); } 50% { box-shadow: inset 0 -3px 0 var(--siren-blue); } }
+      @keyframes blink { 50% { opacity: 0.35; } }
+      #garage { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); display: grid; justify-items: center; gap: 8px; font: 600 clamp(26px, 3.4vw, 38px) ui-serif, Georgia, serif; text-shadow: 0 2px 14px rgb(0 0 0 / 0.6); pointer-events: none; white-space: nowrap; }
+      #garage > .dim:last-child { font: 500 14px system-ui, sans-serif; }
+      body.in-garage :is(#hud, #hint, #help, #wanted, #place) { display: none; }
       .clock { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
       #hint { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); font: 500 14px/1.3 system-ui, sans-serif; pointer-events: none; }
       #help { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 4px; font: 13px/1.4 system-ui, sans-serif; pointer-events: none; }
@@ -54,6 +67,12 @@
       #landing button { font: 600 16px system-ui, sans-serif; color: var(--night); background: var(--ink); border: 0; border-radius: 999px; padding: 14px 28px; cursor: pointer; }
       #landing button:disabled { opacity: 0.7; cursor: progress; }
       #landing .keys { margin: 18px 0 0; font-size: 13px; }
+      #landing .chase { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 22px; padding: 0; border: 0; }
+      #landing .chase legend { margin-bottom: 8px; padding: 0; font-size: 13px; color: var(--dim); }
+      #landing .chase label { position: relative; padding: 8px 14px; border: 2px solid transparent; border-radius: 999px; background: var(--glass); font-weight: 600; font-size: 14px; cursor: pointer; }
+      #landing .chase label:has(:checked) { border-color: var(--ink); }
+      #landing .chase label:has(:focus-visible) { outline: 2px solid var(--fuel); outline-offset: 2px; }
+      #landing .chase input { position: absolute; opacity: 0; pointer-events: none; }
       @media not (any-pointer: fine) { #help { display: none !important; } } /* keyboard controls mean nothing on a phone */
       @media (max-width: 600px) {
         #hud { left: 12px; right: 12px; bottom: 12px; gap: 8px; }
@@ -76,8 +95,15 @@
           Day turns to night as you go. Stop for coffee at a paperboxd café, fill up when the tank runs low, and spot
           stickynotes and thelocalcode along the way.
         </p>
+        <fieldset class="chase">
+          <legend>Chase mode: police on your tail</legend>
+          <label><input type="radio" name="chase" value="off" checked />Off</label>
+          <label><input type="radio" name="chase" value="easy" />Easy</label>
+          <label><input type="radio" name="chase" value="normal" />Normal</label>
+          <label><input type="radio" name="chase" value="hard" />Hard</label>
+        </fieldset>
         <button id="start">Start driving</button>
-        <p class="keys">W A S D to drive · Q autodrive · M map · H all controls</p>
+        <p class="keys">W A S D to drive · Shift nitro · B garage · P chase mode · M map · H all controls</p>
         <p class="keys">Or start in the <a href="?play&amp;place=country">countryside</a>, the <a href="?play&amp;place=mountains">mountains</a> or the <a href="?play&amp;place=desert">desert</a>.</p>
         <p class="keys" id="touch" hidden>Made for a computer with a keyboard. On a phone the car drives itself.</p>
       </div>

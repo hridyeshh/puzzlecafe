@@ -4,12 +4,13 @@ import { CHUNK, RES } from './world/chunk.ts';
 
 export { RAPIER };
 
-/** Steer +1 is full left. Throttle and brake run 0..1; holding brake when stopped reverses. */
-export interface Intent { steer: number; throttle: number; brake: number }
+/** Steer +1 is full left. Throttle and brake run 0..1; holding brake when stopped reverses. Boost 0..1 is nitro. */
+export interface Intent { steer: number; throttle: number; brake: number; boost?: number }
 
 const MASS = 1200; // kg
 const ENGINE = 6000; // N, peak tractive force
 const POWER = 60_000; // W, caps force at speed; top speed lands near 170 km/h
+const NITRO = 1.6; // extra engine with the boost on: about 4 s to 230 km/h
 const REVERSE = 2500; // N
 const REVERSE_MAX = 8; // m/s
 const BRAKE = 30; // Rapier brake: max braking impulse per wheel per step
@@ -19,7 +20,7 @@ const REST = 0.35; // suspension rest length, m
 const RADIUS = 0.34; // wheel radius, m
 
 // Chassis space: +z forward, +x left, +y up. Front wheels first; they steer.
-const HARDPOINTS = [
+export const HARDPOINTS = [
   { x: 0.8, y: -0.15, z: 1.35 },
   { x: -0.8, y: -0.15, z: 1.35 },
   { x: 0.8, y: -0.15, z: -1.3 },
@@ -37,10 +38,18 @@ export function addTerrain(world: RAPIER.World, heights: Float32Array, centreX: 
   return world.createCollider(desc.setTranslation(centreX, 0, centreZ), parent);
 }
 
+/**
+ * A collider on a tile's fixed body (walls, signs, props, trunks). Massless: Rapier's vehicle reads the ground body's own
+ * mass when it works out grip, so a fixed body with mass (density 1 by default) makes the ground under it slippery.
+ */
+export function addFixed(world: RAPIER.World, desc: RAPIER.ColliderDesc, parent?: RAPIER.RigidBody): RAPIER.Collider {
+  return world.createCollider(desc.setDensity(0), parent);
+}
+
 export type Car = ReturnType<typeof createCar>;
 
-/** A car at x, y, z heading along yaw (0 faces +z). */
-export function createCar(world: RAPIER.World, x: number, y: number, z: number, yaw = 0) {
+/** A car at x, y, z heading along yaw (0 faces +z); `power` scales the engine, `grip` is the tyres' friction slip. */
+export function createCar(world: RAPIER.World, x: number, y: number, z: number, yaw = 0, { power = 1, grip = 1.5 } = {}) {
   const body = world.createRigidBody(
     RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y, z)
@@ -64,7 +73,7 @@ export function createCar(world: RAPIER.World, x: number, y: number, z: number, 
     vehicle.setWheelSuspensionRelaxation(i, 2.3);
     vehicle.setWheelMaxSuspensionTravel(i, 0.3);
     vehicle.setWheelMaxSuspensionForce(i, 50_000);
-    vehicle.setWheelFrictionSlip(i, 1.5);
+    vehicle.setWheelFrictionSlip(i, grip);
   }
   let steer = 0;
 
@@ -84,7 +93,7 @@ export function createCar(world: RAPIER.World, x: number, y: number, z: number, 
 
       let force = 0;
       let brake = COAST;
-      if (intent.throttle > 0) force = intent.throttle * Math.min(ENGINE, POWER / Math.max(v, 1));
+      if (intent.throttle > 0) force = intent.throttle * power * (1 + NITRO * (intent.boost ?? 0)) * Math.min(ENGINE, POWER / Math.max(v, 1));
       else if (intent.brake > 0 && v < 1) force = v > -REVERSE_MAX ? -intent.brake * REVERSE : 0;
       else if (Math.abs(v) < 1.5) brake = BRAKE; // no input and nearly stopped: hold the car, even on a slope
       if (intent.brake > 0 && v >= 1) brake = intent.brake * BRAKE;

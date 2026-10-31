@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RAPIER, addTerrain, createCar, createWorld, type Intent } from './physics.ts';
+import { RAPIER, addFixed, addTerrain, createCar, createWorld, type Intent } from './physics.ts';
 import { CHUNK, N, RES, STEP, colliderHeights } from './world/chunk.ts';
 import { makeWorld } from './world/world.ts';
 
@@ -18,13 +18,16 @@ test('a chunk collider matches the chunk heights at its grid points', async () =
   }
 });
 
-test('with no input the car holds still on a 15% slope', async () => {
+test('with no input the car holds still on a 22% slope, on a tile with props', async () => {
   const world = await createWorld();
   const M = RES + 1;
   const ramp = new Float32Array(M * M);
-  for (let i = 0; i < M; i++) for (let j = 0; j < M; j++) ramp[i * M + j] = j * STEP * 0.15; // rises toward +z
-  addTerrain(world, ramp, 0, 0);
-  const car = createCar(world, 0, (RES / 2) * STEP * 0.15 + 1, 0);
+  for (let i = 0; i < M; i++) for (let j = 0; j < M; j++) ramp[i * M + j] = j * STEP * 0.22; // rises toward +z
+  // As streamed: the ground on a fixed body that also holds the tile's props, here one far-off box.
+  const tile = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  addTerrain(world, ramp, 0, 0, tile);
+  addFixed(world, RAPIER.ColliderDesc.cuboid(2, 2, 2).setTranslation(100, 0, 100), tile);
+  const car = createCar(world, 0, (RES / 2) * STEP * 0.22 + 1, 0);
   const idle = { steer: 0, throttle: 0, brake: 0 };
   const step = () => {
     car.update(idle, 1 / 60);

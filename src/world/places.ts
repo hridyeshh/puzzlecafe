@@ -1,6 +1,7 @@
 // Places: what kind of country a point is in, the name of the region around it, and where to find each kind.
 // Pure, like the rest of world/: names come from hashes, so a seed always names the same places the same way.
 import { CHUNK } from './chunk.ts';
+import { FRONT } from './cities.ts';
 import type { Fields } from './fields.ts';
 import { hash, rand } from './hash.ts';
 import { laneOf } from './roads.ts';
@@ -32,6 +33,8 @@ function centre(seed: number, i: number, j: number): [number, number] {
 
 /** The region (x, z) is in: the nearest centre's, named for the kind of country at it (or at x, z if that is sea). */
 export function regionAt(f: Fields, x: number, z: number): { id: string; name: string; biome: Biome; x: number; z: number } {
+  const c = f.city;
+  if (c && Math.hypot(x - c.x, z - c.z) < c.ring + 50) return { id: 'city', name: c.name, biome: 'country', x: c.x, z: c.z };
   const ci = Math.floor(x / CELL);
   const cj = Math.floor(z / CELL);
   let best: [number, number, number, number] = [0, 0, 0, 0];
@@ -60,7 +63,7 @@ export function regionsIn(f: Fields, x0: number, z0: number, x1: number, z1: num
       const [px, pz] = centre(f.seed, i, j);
       if (px < x0 || px >= x1 || pz < z0 || pz >= z1) continue;
       const r = regionAt(f, px, pz);
-      if (r.name) out.push({ name: r.name, x: px, z: pz });
+      if (r.name && r.id !== 'city') out.push({ name: r.name, x: px, z: pz }); // the map names cities itself
     }
   }
   return out;
@@ -110,4 +113,23 @@ export function findPlace(world: World, biome: Exclude<Biome, 'sea'>, x: number,
     }
   }
   return null;
+}
+
+/**
+ * Where travelling to the city starts: the right lane of the expressway on stilts, at its middle, heading with the river
+ * on the right and the ghats on the left, as in the concept art (h: the deck's height). Else the riverfront avenue.
+ */
+export function cityStart(world: World): { x: number; z: number; yaw: number; h?: number } | null {
+  const c = world.fields.city;
+  if (!c) return null;
+  const deck = world.buildings?.deck();
+  if (!deck) {
+    const rho = c.arc + c.half + FRONT;
+    return roadNear(world, c.ox + Math.cos(c.beta + 0.02) * rho, c.oz + Math.sin(c.beta + 0.02) * rho, (x, z) => Math.hypot(x - c.x, z - c.z) < c.ring);
+  }
+  const k = Math.floor(deck.x.length * 0.25); // the yantra hangs over the river ~900 m ahead
+  const l = Math.hypot(deck.x[k + 1] - deck.x[k - 1], deck.z[k + 1] - deck.z[k - 1]) || 1;
+  let [dx, dz] = [(deck.x[k + 1] - deck.x[k - 1]) / l, (deck.z[k + 1] - deck.z[k - 1]) / l];
+  if (-dz * (c.ox - deck.x[k]) + dx * (c.oz - deck.z[k]) < 0) [dx, dz] = [-dx, -dz]; // right of (dx, dz) is (-dz, dx): the river's side
+  return { x: deck.x[k] - dz * laneOf(deck), z: deck.z[k] + dx * laneOf(deck), yaw: Math.atan2(dx, dz), h: deck.h[k] };
 }

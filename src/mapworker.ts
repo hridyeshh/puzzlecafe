@@ -1,5 +1,6 @@
 // Draws map tiles off the main thread: land and sea, then roads, on an OffscreenCanvas. The cafés and stations on a
 // tile go back as points, so the main thread can badge them at a constant size.
+import { riverAt, urban } from './world/cities.ts';
 import { COAST_C, type Sample, smoothstep } from './world/fields.ts';
 import { regionsIn } from './world/places.ts';
 import type { PoiKind } from './world/pois.ts';
@@ -32,6 +33,8 @@ const HIGH = [176, 168, 120];
 const ALPINE = [128, 138, 116];
 const SNOW = [236, 238, 242];
 const DESERT = [222, 182, 126];
+const PAVING = [150, 140, 128]; // a city
+const RIVER = [26, 34, 44];
 const PAD = 120; // m of roads beyond the tile: strokes run on across its edge, and POIs see junctions out there
 const mix = (a: number[], b: number[], t: number) => a.map((v, i) => v + (b[i] - v) * t);
 
@@ -49,6 +52,8 @@ self.onmessage = (e: MessageEvent<MapJob>) => {
   // heights lets each pixel shade against its neighbours.
   const n = px / 2;
   const s: Sample = { c: 0, smooth: 0, detail: 0, peak: 0, alpine: 0, arid: 0 };
+  const city = world.fields.city;
+  const river = { across: 0, past: 0 };
   const heights = new Float32Array((n + 1) * (n + 1));
   const colours: number[][] = [];
   for (let j = 0; j <= n; j++) {
@@ -59,6 +64,14 @@ self.onmessage = (e: MessageEvent<MapJob>) => {
       if (i === 0 || j === 0) continue;
       let rgb = s.c < 0 ? mix(SHALLOW, DEEP, Math.min(1, -s.c * 6)) : s.c < COAST_C * 0.4 ? SAND : mix(LOW, HIGH, Math.min(1, s.c * 1.5));
       if (s.c >= 0) rgb = mix(mix(mix(rgb, ALPINE, s.alpine), DESERT, s.arid), SNOW, smoothstep(430, 520, h));
+      // A city: paved where it is built up (open land in its outskirts and across the river), sand down to its river,
+      // the river dark.
+      const [wx, wz] = [x0 + (i - 0.5) * 2 * m, z0 + (j - 0.5) * 2 * m];
+      if (city && Math.hypot(wx - city.x, wz - city.z) < city.ring + 20) {
+        if (h < city.water) rgb = RIVER;
+        else if (h < city.level - 0.5) rgb = riverAt(city, wx, wz, river).across < 0 ? SAND : PAVING;
+        else rgb = mix(rgb, PAVING, smoothstep(0.15, 0.4, urban(city, wx, wz)));
+      }
       colours[(j - 1) * n + i - 1] = rgb;
     }
   }

@@ -34,13 +34,17 @@ const WAVES = [
   [0.45, 0.89, 9, 0.05],
 ];
 
-export function createOcean() {
+/** `environment`: what the sea reflects, instead of the scene's environment. */
+export function createOcean(environment?: THREE.Node) {
   const offset = uniform(new THREE.Vector2()); // world x, z of the plane's centre
   const xz = positionLocal.xz.add(offset);
   let lift: THREE.Node<'vec3'> = vec3(0, 0, 0);
   let nx: THREE.Node<'float'> = float(0);
   let ny: THREE.Node<'float'> = float(1);
   let nz: THREE.Node<'float'> = float(0);
+  // Far out, the waves still rise and fall but tilt the surface less: their normals, sampled ever more sparsely, would
+  // band the sky's reflection into stripes.
+  const calm = smoothstep(1400, 300, positionWorld.sub(cameraPosition).length());
   for (const [dx, dz, length, amp] of WAVES) {
     const l = Math.hypot(dx, dz);
     const k = (2 * Math.PI) / length;
@@ -48,9 +52,9 @@ export function createOcean() {
     const c = cos(phase);
     const s = sin(phase);
     lift = lift.add(vec3(c.mul((STEEP * amp * dx) / l), s.mul(amp), c.mul((STEEP * amp * dz) / l)));
-    nx = nx.sub(c.mul((dx / l) * k * amp));
-    ny = ny.sub(s.mul(STEEP * k * amp));
-    nz = nz.sub(c.mul((dz / l) * k * amp));
+    nx = nx.sub(c.mul((dx / l) * k * amp).mul(calm));
+    ny = ny.sub(s.mul(STEEP * k * amp).mul(calm));
+    nz = nz.sub(c.mul((dz / l) * k * amp).mul(calm));
   }
 
   // Ripples too small to move the surface, only to tilt it: they break the sun into glitter near the car. They fade out
@@ -64,6 +68,7 @@ export function createOcean() {
   }
 
   const material = new THREE.MeshStandardNodeMaterial({ roughness: 0.05, metalness: 0, transparent: true });
+  if (environment) material.envNode = environment;
   material.positionNode = positionLocal.add(lift);
   material.normalNode = transformNormalToView(vec3(nx, ny, nz).normalize());
   // Metres of water between the surface and whatever is behind it along the view ray.
